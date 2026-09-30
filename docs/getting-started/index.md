@@ -17,6 +17,7 @@ This section covers building vesta from source, installing it on Kata nodes with
 2. [Deploying](deploying.md): guest image build, `helm install`, running a pod, checking the install, uninstalling.
 3. [Configuration](configuration.md): agent flags and config file, the static policy file, `guestd.toml`, Helm values.
 4. [Operations](operations.md): event format, metrics, health endpoints, heartbeats and tamper alerts, kill switch, failure policy, troubleshooting.
+5. [AWS EKS reference architecture](aws-eks.md): sandboxed AI agents on Karpenter nodes with nested virtualization, Kata Containers, and vesta.
 
 ## Prerequisites
 

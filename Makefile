@@ -137,6 +137,27 @@ helm-check: ## Lint the chart, fail if deploy/manifests is stale, validate with 
 crd-check: ## Check the VestaPolicy CRD, status server-side apply and admission policy on a throwaway k3s (privileged Docker)
 	hack/crd-check.sh
 
+##@ End-to-end (Linux host with /dev/kvm; see test/e2e/README.md)
+
+.PHONY: e2e-up
+e2e-up: ## Single-node k3s + Cilium + Kata (kata-deploy) on this host
+	test/e2e/up.sh
+
+.PHONY: e2e-deploy
+e2e-deploy: ## Build vesta (guest kernel, rootfs, images) and install it on the e2e cluster
+	test/e2e/deploy-vesta.sh
+
+.PHONY: e2e-test
+e2e-test: ## Run the e2e tests against the e2e cluster
+	test/e2e/test.sh
+
+.PHONY: e2e
+e2e: e2e-up e2e-deploy e2e-test ## All of the above
+
+.PHONY: e2e-down
+e2e-down: ## Remove vesta and the test namespace (test/e2e/down.sh --all also removes k3s)
+	test/e2e/down.sh
+
 ##@ Quality
 
 .PHONY: lint

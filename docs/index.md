@@ -83,6 +83,7 @@ The full list, including deviations from the design, is in [Implementation statu
 | Know what a node needs and what vesta changes on it | [Getting Started](getting-started/index.md) |
 | Build the binaries, BPF objects, guest kernel, guest image and container images | [Building](getting-started/building.md) |
 | Install the chart and run a pod under vesta | [Deploying](getting-started/deploying.md) |
+| Run sandboxed AI agents on Amazon EKS with Karpenter, Kata and vesta | [AWS EKS reference architecture](getting-started/aws-eks.md) |
 | Set agent flags, write a policy file, tune the guest daemon | [Configuration](getting-started/configuration.md) |
 | Read events and metrics, use the kill switch, troubleshoot | [Operations](getting-started/operations.md) |
 | Understand each component's internals | [Components](components/index.md) |

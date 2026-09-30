@@ -1,0 +1,160 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1260 890" width="1260" height="890" role="img" aria-labelledby="t d">
+  <title id="t">vesta on Amazon EKS with Karpenter and Kata Containers</title>
+  <desc id="d">An AWS region with a VPC. The EKS control plane holds VestaPolicy objects. A system node group runs Karpenter, which launches EC2 nodes with nested virtualization from the kata EC2NodeClass and sandboxed-agents NodePool. Each node runs kata-deploy and vesta-agent on the host; every sandboxed AI agent pod runs in its own Kata VM with a guest kernel where vesta-guestd loads eBPF programs and streams events over vsock to vesta-agent, which exports them to CloudWatch or a SIEM. Host eBPF tools only see a QEMU process.</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrowv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"/>
+    </marker>
+    <linearGradient id="vm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0b1120"/>
+    </linearGradient>
+    <radialGradient id="eye" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#c4b5fd" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <style>
+    text  { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: #1f2937; }
+    .h    { font-size: 14px; font-weight: 700; }
+    .t    { font-size: 12.5px; font-weight: 600; }
+    .s    { font-size: 11px; }
+    .xs   { font-size: 10px; }
+    .w    { fill: #f8fafc; }
+    .wm   { fill: #cbd5e1; }
+    .mono { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 10.5px; }
+    .edge { stroke: #475569; stroke-width: 1.6; fill: none; }
+    .vs   { stroke: #7c3aed; stroke-width: 2; fill: none; stroke-dasharray: 5 3; }
+  </style>
+
+  <!-- canvas -->
+  <rect x="0" y="0" width="1260" height="890" fill="#ffffff"/>
+
+  <!-- AWS Cloud -->
+  <rect x="10" y="10" width="1240" height="870" rx="4" fill="none" stroke="#232f3e" stroke-width="1.5"/>
+  <rect x="10" y="10" width="100" height="24" fill="#232f3e"/>
+  <text x="22" y="27" class="t w">AWS Cloud</text>
+
+  <!-- Region -->
+  <rect x="26" y="44" width="1208" height="822" rx="4" fill="none" stroke="#00a4a6" stroke-width="1.4" stroke-dasharray="6 4"/>
+  <text x="38" y="64" class="t" style="fill:#007f80">Region</text>
+
+  <!-- EKS control plane -->
+  <rect x="44" y="84" width="210" height="56" rx="6" fill="#fff4ea" stroke="#ed7100" stroke-width="1.5"/>
+  <text x="149" y="117" class="h" text-anchor="middle">Amazon EKS</text>
+
+  <!-- VPC -->
+  <rect x="276" y="84" width="742" height="770" rx="6" fill="#fbfdf7" stroke="#7aa116" stroke-width="1.6"/>
+  <text x="290" y="104" class="t" style="fill:#4d6b0c">VPC 10.x.x.x/x</text>
+
+  <!-- subnets -->
+  <rect x="296" y="116" width="702" height="56" rx="4" fill="#f2f6e8" stroke="#7aa116"/>
+  <text x="310" y="136" class="t" style="fill:#4d6b0c">Subnets (3 AZs)</text>
+  <text x="310" y="156" class="s">NAT gateways (egress for image pulls and allowed model APIs)</text>
+
+  <!-- private subnets -->
+  <rect x="296" y="184" width="702" height="660" rx="4" fill="#e6f6f7" stroke="#00a4a6"/>
+  <text x="310" y="204" class="t" style="fill:#007f80">Private subnets (3 AZs)</text>
+
+  <!-- system node group -->
+  <rect x="316" y="218" width="300" height="148" rx="6" fill="#ffffff" stroke="#ed7100" stroke-width="1.3"/>
+  <text x="330" y="240" class="t">Managed node group: system</text>
+  <text x="330" y="262" class="s">• Karpenter controller</text>
+  <text x="330" y="280" class="s">• CoreDNS, Amazon VPC CNI</text>
+  <text x="342" y="298" class="s">(or Cilium with</text>
+  <text x="342" y="314" class="mono">socketLB.hostNamespaceOnly</text>
+  <text x="342" y="330" class="s">for Kata pods)</text>
+  <text x="330" y="352" class="xs" style="fill:#9a4a00">regular instances, no nesting needed</text>
+
+  <!-- Karpenter EC2NodeClass / NodePool -->
+  <rect x="632" y="218" width="350" height="148" rx="6" fill="#ffffff" stroke="#ed7100" stroke-width="1.3"/>
+  <text x="646" y="240" class="t">Karpenter</text>
+  <text x="646" y="260" class="s" style="font-weight:600">EC2NodeClass <tspan class="mono">kata</tspan></text>
+  <text x="658" y="276" class="mono">cpuOptions.nestedVirtualization: enabled</text>
+  <text x="658" y="292" class="s">AL2023 · IMDSv2, hop limit 1</text>
+  <text x="646" y="312" class="s" style="font-weight:600">NodePool <tspan class="mono">sandboxed-agents</tspan></text>
+  <text x="658" y="328" class="s">c8i / m8i / r8i (nested-virtualization)</text>
+  <text x="658" y="344" class="s">taint sandboxed=true · startup taint</text>
+  <text x="658" y="358" class="xs" style="fill:#9a4a00">removed by kata-deploy when Kata is ready</text>
+  <path d="M808,366 V392" class="edge" marker-end="url(#arrow)"/>
+  <text x="814" y="384" class="xs" style="fill:#475569">launches</text>
+
+  <!-- Kata node -->
+  <rect x="316" y="394" width="666" height="440" rx="8" fill="#ffffff" stroke="#ed7100" stroke-width="2.2"/>
+  <text x="330" y="414" class="t">EC2 m8i node (nested virtualization)</text>
+
+  <!-- EKS API -> vesta-agent (drawn over the node frame) -->
+  <path d="M254,112 H286 V380 H780 V432" class="edge" marker-end="url(#arrow)"/>
+  <rect x="330" y="373" width="236" height="13" fill="#e6f6f7"/>
+  <text x="334" y="383" class="xs" style="fill:#334155">watch VestaPolicy · write own node's status</text>
+
+  <!-- host row -->
+  <rect x="332" y="434" width="190" height="62" rx="5" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="344" y="457" class="t">kubelet +</text>
+  <text x="344" y="474" class="s">containerd (NRI)</text>
+  <text x="344" y="489" class="xs" style="fill:#475569">runc pods as usual</text>
+
+  <rect x="538" y="434" width="190" height="62" rx="5" fill="#f8fafc" stroke="#94a3b8"/>
+  <text x="550" y="457" class="t">kata-deploy</text>
+  <text x="550" y="474" class="s">Kata 4.2 runtime</text>
+  <text x="550" y="489" class="xs" style="fill:#475569">qemu-runtime-rs</text>
+
+  <rect x="744" y="434" width="222" height="62" rx="5" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="756" y="457" class="t" style="fill:#5b21b6">vesta-agent</text>
+  <text x="756" y="474" class="s">NRI start gate · policy push</text>
+  <text x="756" y="489" class="s">events + metrics export</text>
+
+  <!-- vesta-agent -> observability -->
+  <path d="M900,434 V424 H1046" class="edge" marker-end="url(#arrow)"/>
+
+  <!-- Kata VM -->
+  <rect x="332" y="512" width="306" height="308" rx="8" fill="url(#vm)" stroke="#334155" stroke-width="1.5"/>
+  <text x="346" y="533" class="t w">Kata VM · sandbox A</text>
+  <text x="520" y="533" class="xs wm">own guest kernel</text>
+
+  <rect x="346" y="544" width="278" height="84" rx="5" fill="#1e293b" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="358" y="565" class="t" style="fill:#fbbf24">AI agent container</text>
+  <text x="358" y="583" class="s w">runs untrusted, model-generated code:</text>
+  <text x="358" y="599" class="s w">python, shell, pip, curl, tools</text>
+  <text x="358" y="617" class="xs wm">a kernel exploit lands in this VM, not the node</text>
+
+  <rect x="346" y="640" width="278" height="50" rx="5" fill="#6d28d9" stroke="#a78bfa"/>
+  <text x="358" y="660" class="t w">vesta-guestd</text>
+  <text x="358" y="678" class="s w">loads eBPF, applies policy maps</text>
+
+  <rect x="346" y="702" width="278" height="104" rx="5" fill="#111827" stroke="#7c3aed"/>
+  <circle cx="598" cy="728" r="20" fill="url(#eye)"/>
+  <ellipse cx="598" cy="728" rx="13" ry="7.5" fill="none" stroke="#ddd6fe" stroke-width="1.6"/>
+  <circle cx="598" cy="728" r="3.6" fill="#ddd6fe"/>
+  <text x="358" y="722" class="t w">guest kernel 6.18 + vesta BPF</text>
+  <text x="358" y="741" class="mono" style="fill:#c4b5fd">sched_process_exec</text>
+  <text x="358" y="757" class="mono" style="fill:#c4b5fd">lsm/bprm_check_security</text>
+  <text x="358" y="773" class="mono" style="fill:#c4b5fd">cgroup/connect4, connect6</text>
+  <text x="358" y="794" class="xs" style="fill:#ddd6fe">every exec and connect: audited or denied</text>
+
+  <!-- host eBPF tools: outside the VM, next to it -->
+  <rect x="680" y="744" width="286" height="62" rx="5" fill="#f8fafc" stroke="#94a3b8" stroke-dasharray="4 3"/>
+  <text x="692" y="767" class="t" style="fill:#64748b">host eBPF tools</text>
+  <text x="692" y="784" class="s" style="fill:#64748b">see one qemu process</text>
+  <text x="692" y="799" class="s" style="fill:#64748b">per pod, nothing inside</text>
+
+  <!-- vsock: vesta-guestd -> vesta-agent -->
+  <path d="M624,665 H855 V498" class="vs" marker-end="url(#arrowv)"/>
+  <rect x="712" y="658" width="40" height="14" fill="#ffffff"/>
+  <text x="732" y="669" class="xs" style="fill:#6d28d9" text-anchor="middle">vsock</text>
+
+  <!-- observability -->
+  <rect x="1046" y="384" width="176" height="140" rx="6" fill="#fdf2f8" stroke="#e7157b"/>
+  <text x="1058" y="406" class="t">Observability</text>
+  <text x="1058" y="426" class="s">CloudWatch Logs / SIEM</text>
+  <text x="1058" y="442" class="xs" style="fill:#475569">(Fluent Bit or OTLP)</text>
+  <text x="1058" y="460" class="s">Amazon Managed</text>
+  <text x="1058" y="475" class="s">Service for Prometheus</text>
+  <text x="1058" y="494" class="xs" style="fill:#475569">pod-labelled exec/connect</text>
+  <text x="1058" y="508" class="xs" style="fill:#475569">events, denials, tamper alerts</text>
+</svg>

@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# End-to-end tests on k3s + Cilium + Kata Containers with vesta built from
+# this commit. GitHub-hosted Linux runners expose /dev/kvm, which Kata needs.
+# Slow (guest kernel build), so it runs on demand and nightly, not per push.
+name: e2e
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  k3s-cilium-kata:
+    name: k3s + Cilium + Kata (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      E2E_ARTIFACTS: ${{ github.workspace }}/e2e-artifacts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enable KVM for the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: Free disk space for the kernel and rootfs builds
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          df -h /
+      - name: Bring up k3s, Cilium and Kata
+        run: test/e2e/up.sh
+      - name: Build and deploy vesta
+        run: test/e2e/deploy-vesta.sh
+      - name: Run the e2e tests
+        run: test/e2e/test.sh
+      - name: Collect logs
+        if: failure()
+        run: test/e2e/collect-logs.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: e2e-artifacts
+          path: e2e-artifacts
+          retention-days: 7
