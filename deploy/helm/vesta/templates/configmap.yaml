@@ -3,8 +3,16 @@
 {{- $_ := set $cfg "handlers" (list .Values.runtimeClass.handler) }}
 {{- /* Loopback unless exposed; an exposed agent gets --metrics-addr=<node IP> (daemonset.yaml). */}}
 {{- $_ := set $cfg "metricsAddr" (printf "127.0.0.1:%d" (int .Values.metrics.port)) }}
+{{- if eq .Values.policies.source "kubernetes" }}
 {{- if .Values.staticPolicies }}
+{{- fail "staticPolicies is only used with policies.source static" }}
+{{- end }}
+{{- $_ := set $cfg "policySource" "kubernetes" }}
+{{- $_ := set $cfg "policySyncTimeout" .Values.policies.syncTimeout }}
+{{- else if .Values.staticPolicies }}
+{{- $_ := set $cfg "policySource" "file" }}
 {{- $_ := set $cfg "policyFile" "/etc/vesta/policies/policies.yaml" }}
+{{- $_ := set $cfg "policyReloadInterval" .Values.policies.reloadInterval }}
 {{- end }}
 apiVersion: v1
 kind: ConfigMap
@@ -16,25 +24,6 @@ metadata:
 data:
   agent.yaml: |
     {{- toYaml $cfg | nindent 4 }}
-{{- if .Values.staticPolicies }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "vesta.fullname" . }}-policies
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "vesta.labels" . | nindent 4 }}
-data:
-  policies.yaml: |
-    {{- range $i, $p := .Values.staticPolicies }}
-    {{- if or (ne $p.apiVersion "vesta.dev/v1alpha1") (ne $p.kind "VestaPolicy") }}
-    {{- fail (printf "staticPolicies[%d] must be apiVersion vesta.dev/v1alpha1, kind VestaPolicy" $i) }}
-    {{- end }}
-    ---
-    {{- toYaml $p | nindent 4 }}
-    {{- end }}
-{{- end }}
 {{- if .Values.agent.seccomp.installProfile }}
 ---
 apiVersion: v1

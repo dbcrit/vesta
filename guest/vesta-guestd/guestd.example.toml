@@ -26,9 +26,10 @@ ringbuf_bytes = 4194304
 replay_max_events = 16384
 replay_max_bytes = 8388608
 
-# How long a BindContainer waits for the container's cgroup to appear.
+# How long a BindContainer waits for the container's cgroup to appear. The wait
+# is woken by inotify; bind_poll_ms is only the fallback re-check interval.
 bind_timeout_ms = 10000
-bind_poll_ms = 20
+bind_poll_ms = 100
 frame_timeout_ms = 10000
 write_timeout_ms = 10000
 # How often bindings of deleted cgroups are collected.

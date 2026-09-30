@@ -1,6 +1,6 @@
 # host/
 
-Go code for the node side. It uses the single Go module at the repo root, `github.com/dbcrit/vesta` (placeholder path).
+Go code for the node side. It uses the single Go module at the repo root, `github.com/dbcrit/vesta`.
 
 **Owner:** the host implementer. Linux builds and tests run in Docker (`hack/go-docker.sh go test ./...`; for `-race`, run the same image with `CGO_ENABLED=1`).
 

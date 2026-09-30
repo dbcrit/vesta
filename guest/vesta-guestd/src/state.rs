@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context};
 
 use crate::abi::{self, CgroupPolicy, ExecKey, NetKeyV4, NetKeyV6, RuleValue};
-use crate::cgroup::{guest_cgroup_path, validate_container_id};
+use crate::cgroup::{guest_cgroup_path, pod_cgroup_path, validate_container_id};
 use crate::policy::{self, CompiledPolicy, Rejection};
 use crate::proto::channel::{self as pb, ErrorCode};
 use crate::resolve::{ExecResolver, FileId};
@@ -86,6 +86,16 @@ pub struct BindTicket {
     epoch: u64,
 }
 
+/// Pending entry on the pod-level cgroup for container cgroups that are not
+/// bound (control.proto SetSandboxDefault).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxDefault {
+    pub path: PathBuf,
+    pub cgroup_id: u64,
+    pub mode: u8,
+    pub failure: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outcome {
     pub generation: u64,
@@ -118,8 +128,12 @@ pub struct Engine<M> {
     /// Rule entries found at startup. They stay installed for as long as an
     /// orphan still references their policy_id.
     adopted: MapState,
+    /// policy_ready found at startup. ApplyPolicy below it is rejected until
+    /// a generation is applied, so generations never go backwards in a boot.
+    adopted_generation: u64,
     /// Relative cgroup paths a bind must not cover (guestd, kata-agent).
     protected_cgroups: Vec<PathBuf>,
+    sandbox_default: Option<SandboxDefault>,
     installed: MapState,
     next_epoch: u64,
 }
@@ -163,7 +177,9 @@ impl<M: PolicyMaps> Engine<M> {
             bindings: BTreeMap::new(),
             orphans: HashMap::new(),
             adopted: MapState::default(),
+            adopted_generation: 0,
             protected_cgroups: Vec::new(),
+            sandbox_default: None,
             installed: MapState::default(),
             next_epoch: 1,
         }
@@ -171,7 +187,7 @@ impl<M: PolicyMaps> Engine<M> {
 
     /// Adopts map contents left by a previous guestd in this boot: entries
     /// keep enforcing until the host re-binds (cgroups) or re-applies (rules).
-    pub fn adopt(&mut self, found: MapState, global_mode: u32) {
+    pub fn adopt(&mut self, found: MapState, global_mode: u32, policy_ready: u64) {
         self.orphans = found.cgroups.clone();
         self.adopted = MapState {
             cgroups: HashMap::new(),
@@ -179,6 +195,26 @@ impl<M: PolicyMaps> Engine<M> {
         };
         self.installed = found;
         self.global_mode = global_mode;
+        self.adopted_generation = policy_ready;
+    }
+
+    pub fn adopted_generation(&self) -> u64 {
+        self.adopted_generation
+    }
+
+    /// Adopted cgroup entries no binding has claimed, by cgroup id.
+    pub fn adopted_cgroups(&self) -> Vec<pb::AdoptedCgroup> {
+        let mut v: Vec<_> = self
+            .orphans
+            .iter()
+            .map(|(&id, p)| pb::AdoptedCgroup {
+                cgroup_id: id,
+                policy_id: p.policy_id,
+                generation: p.generation,
+            })
+            .collect();
+        v.sort_unstable_by_key(|a| a.cgroup_id);
+        v
     }
 
     /// Cgroups (relative to the cgroup2 root) that must never be bound, nor
@@ -186,6 +222,73 @@ impl<M: PolicyMaps> Engine<M> {
     /// kata-agent through the BPF ancestor lookup.
     pub fn set_protected_cgroups(&mut self, paths: Vec<PathBuf>) {
         self.protected_cgroups = paths;
+    }
+
+    fn check_not_protected(&self, cgroup_path: &std::path::Path) -> Result<(), Rejection> {
+        match self
+            .protected_cgroups
+            .iter()
+            .find(|p| p.starts_with(cgroup_path))
+        {
+            Some(p) => Err(Rejection::invalid(format!(
+                "cgroup {} contains protected cgroup {}",
+                cgroup_path.display(),
+                p.display()
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Validates a SetSandboxDefault. `Ok(None)` clears the default; otherwise
+    /// the caller resolves the path to a cgroup id and calls `set_sandbox_default`.
+    pub fn sandbox_default_prepare(
+        &self,
+        req: &pb::SetSandboxDefault,
+    ) -> Result<Option<(PathBuf, u8, u8)>, Rejection> {
+        let mode = policy::mode_from_proto(req.mode)?;
+        let failure = policy::failure_from_proto(req.failure)?;
+        if failure != abi::failure::CLOSED {
+            return Ok(None);
+        }
+        if mode == abi::mode::ENFORCE && !self.enforce_supported {
+            return Err(Rejection::invalid(
+                "enforce mode is not supported by this guest",
+            ));
+        }
+        let path =
+            pod_cgroup_path(&req.cgroup_parent).map_err(|e| Rejection::invalid(e.to_string()))?;
+        self.check_not_protected(&path)?;
+        Ok(Some((path, mode, failure)))
+    }
+
+    /// Installs (or with `None` removes) the sandbox default entry.
+    pub fn set_sandbox_default(
+        &mut self,
+        d: Option<SandboxDefault>,
+    ) -> Result<Outcome, EngineError> {
+        let previous = std::mem::replace(&mut self.sandbox_default, d);
+        let orphan = self.sandbox_default.as_ref().and_then(|sd| {
+            self.orphans
+                .remove(&sd.cgroup_id)
+                .map(|o| (sd.cgroup_id, o))
+        });
+        if let Err(e) = self.reconcile() {
+            self.sandbox_default = previous;
+            if let Some((id, o)) = orphan {
+                self.orphans.insert(id, o);
+            }
+            return Err(EngineError::Failed(
+                e.context("installing the sandbox default"),
+            ));
+        }
+        Ok(Outcome {
+            generation: self.applied_generation,
+            warnings: Vec::new(),
+        })
+    }
+
+    pub fn sandbox_default(&self) -> Option<&SandboxDefault> {
+        self.sandbox_default.as_ref()
     }
 
     pub fn applied_generation(&self) -> u64 {
@@ -316,6 +419,16 @@ impl<M: PolicyMaps> Engine<M> {
             }
         }
         d.exec = exec.into_iter().collect();
+        if let Some(sd) = &self.sandbox_default {
+            // A binding on the same cgroup is more specific and wins.
+            d.cgroups.entry(sd.cgroup_id).or_insert(CgroupPolicy {
+                generation: self.applied_generation,
+                mode: sd.mode,
+                failure: sd.failure,
+                flags: abi::CGF_PENDING,
+                ..Default::default()
+            });
+        }
         if let Some(p) = self.applied() {
             d.net4 = p.net4.iter().map(|(k, v)| (*k, *v)).collect();
             d.net6 = p.net6.iter().map(|(k, v)| (*k, *v)).collect();
@@ -478,6 +591,13 @@ impl<M: PolicyMaps> Engine<M> {
             ))
             .into());
         }
+        if self.applied_generation == 0 && generation < self.adopted_generation {
+            return Err(Rejection::invalid(format!(
+                "generation {generation} is older than generation {} adopted from the previous guestd",
+                self.adopted_generation
+            ))
+            .into());
+        }
         if generation == self.applied_generation {
             return Ok(Outcome {
                 generation,
@@ -540,17 +660,7 @@ impl<M: PolicyMaps> Engine<M> {
         validate_container_id(&req.container_id).map_err(|e| Rejection::invalid(e.to_string()))?;
         let cgroup_path = guest_cgroup_path(&req.cgroup_path, &req.container_id)
             .map_err(|e| Rejection::invalid(e.to_string()))?;
-        if let Some(p) = self
-            .protected_cgroups
-            .iter()
-            .find(|p| p.starts_with(&cgroup_path))
-        {
-            return Err(Rejection::invalid(format!(
-                "cgroup {} contains protected cgroup {}",
-                cgroup_path.display(),
-                p.display()
-            )));
-        }
+        self.check_not_protected(&cgroup_path)?;
         let rootfs_type = pb::RootfsType::try_from(req.rootfs)
             .map_err(|_| Rejection::invalid(format!("unknown rootfs type {}", req.rootfs)))?
             as i32 as u8;
@@ -709,6 +819,18 @@ impl<M: PolicyMaps> Engine<M> {
             },
         );
         let mut warnings = Vec::new();
+        if let Some(sd) = &self.sandbox_default {
+            if t.cgroup_path.parent() != Some(sd.path.as_path()) {
+                push_warning(
+                    &mut warnings,
+                    format!(
+                        "container cgroup {} is not directly under the pod cgroup {}; the sandbox default does not match this layout",
+                        t.cgroup_path.display(),
+                        sd.path.display()
+                    ),
+                );
+            }
+        }
         let r = self.resolve_binding(&t.container_id, &mut warnings);
         let value = match self.bindings.get_mut(&t.container_id) {
             Some(b) => {
@@ -800,7 +922,15 @@ impl<M: PolicyMaps> Engine<M> {
         self.bindings
             .retain(|_, b| b.cgroup_id.is_none_or(|id| existing.contains(&id)));
         self.orphans.retain(|id, _| existing.contains(id));
-        let removed = before - self.bindings.len() - self.orphans.len();
+        let mut removed = before - self.bindings.len() - self.orphans.len();
+        if self
+            .sandbox_default
+            .as_ref()
+            .is_some_and(|sd| !existing.contains(&sd.cgroup_id))
+        {
+            self.sandbox_default = None;
+            removed += 1;
+        }
         if removed > 0 {
             self.reconcile()?;
         }
@@ -1214,11 +1344,189 @@ mod tests {
             },
         );
         e.maps.state = found.clone();
-        e.adopt(found, abi::global_mode::NORMAL);
+        e.adopt(found, abi::global_mode::NORMAL, 0);
         e.apply(&apply(1, vec![])).unwrap();
         assert!(e.maps.state.cgroups.contains_key(&77));
         assert_eq!(e.gc(&HashSet::from([1])).unwrap(), 1);
         assert!(e.maps.state.cgroups.is_empty());
+    }
+
+    #[test]
+    fn adopted_generation_is_a_floor_until_applied() {
+        let mut e = engine(resolver());
+        let mut found = MapState::default();
+        found.cgroups.insert(
+            77,
+            CgroupPolicy {
+                policy_id: 3,
+                generation: 40,
+                ..Default::default()
+            },
+        );
+        e.maps.state = found.clone();
+        e.maps.policy_ready = 40;
+        e.adopt(found, abi::global_mode::NORMAL, 40);
+        assert_eq!(e.adopted_generation(), 40);
+        assert_eq!(e.applied_generation(), 0);
+        assert_eq!(
+            e.adopted_cgroups(),
+            vec![pb::AdoptedCgroup {
+                cgroup_id: 77,
+                policy_id: 3,
+                generation: 40
+            }]
+        );
+
+        // An agent with an older generation must not move policy_ready back.
+        assert!(e.apply(&apply(39, vec![])).is_err());
+        assert_eq!(e.maps.policy_ready, 40);
+        assert_eq!(e.applied_generation(), 0);
+
+        // The same generation is applied, not treated as a no-op.
+        e.apply(&apply(40, vec![])).unwrap();
+        assert_eq!(e.applied_generation(), 40);
+        assert_eq!(e.maps.policy_ready, 40);
+        // Orphans are still listed until re-bound or collected.
+        assert_eq!(e.adopted_cgroups().len(), 1);
+    }
+
+    fn sandbox_default_req(
+        parent: &str,
+        mode: pb::Mode,
+        failure: pb::FailurePolicy,
+    ) -> pb::SetSandboxDefault {
+        pb::SetSandboxDefault {
+            cgroup_parent: parent.into(),
+            mode: mode as i32,
+            failure: failure as i32,
+        }
+    }
+
+    fn install_default(e: &mut Engine<FakeMaps>, id: u64) {
+        let (path, mode, failure) = e
+            .sandbox_default_prepare(&sandbox_default_req(
+                "kubepods-pod1.slice",
+                pb::Mode::Enforce,
+                pb::FailurePolicy::Closed,
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(path, PathBuf::from("kubepods.slice/kubepods-pod1.slice"));
+        e.set_sandbox_default(Some(SandboxDefault {
+            path,
+            cgroup_id: id,
+            mode,
+            failure,
+        }))
+        .unwrap();
+    }
+
+    #[test]
+    fn sandbox_default_covers_unbound_cgroups_until_bound() {
+        let mut e = engine(resolver());
+        e.apply(&apply(
+            1,
+            vec![bundle(7, pb::Mode::Enforce, pb::FailurePolicy::Closed)],
+        ))
+        .unwrap();
+        install_default(&mut e, 500);
+        let cg = e.maps.state.cgroups[&500];
+        assert_eq!(
+            (cg.policy_id, cg.mode, cg.failure, cg.flags, cg.generation),
+            (
+                0,
+                abi::mode::ENFORCE,
+                abi::failure::CLOSED,
+                abi::CGF_PENDING,
+                1
+            ),
+            "pending + Closed: BPF denies exec/connect below the pod cgroup"
+        );
+
+        // A bound container has its own, nearer entry; the default stays for the rest.
+        let t = e.bind_prepare(&bind("c1", 7, 1)).unwrap();
+        let out = e.bind_complete(&t, 1000).unwrap();
+        assert!(
+            out.warnings.iter().all(|w| !w.contains("pod cgroup")),
+            "container is directly under the pod cgroup: {:?}",
+            out.warnings
+        );
+        assert_eq!(e.maps.state.cgroups[&1000].policy_id, 7);
+        assert!(e.maps.state.cgroups.contains_key(&500));
+
+        // Open clears it.
+        let cleared = e
+            .sandbox_default_prepare(&sandbox_default_req(
+                "kubepods-pod1.slice",
+                pb::Mode::Enforce,
+                pb::FailurePolicy::Open,
+            ))
+            .unwrap();
+        assert!(cleared.is_none());
+        e.set_sandbox_default(None).unwrap();
+        assert!(!e.maps.state.cgroups.contains_key(&500));
+        assert!(e.maps.state.cgroups.contains_key(&1000));
+    }
+
+    #[test]
+    fn sandbox_default_validation_and_gc() {
+        let mut e = engine(resolver());
+        e.set_protected_cgroups(vec![PathBuf::from("system.slice/kata-agent.service")]);
+        for (parent, why) in [
+            ("system.slice", "contains kata-agent"),
+            ("", "cgroup root"),
+            ("/a/../b", "escape"),
+        ] {
+            assert!(
+                e.sandbox_default_prepare(&sandbox_default_req(
+                    parent,
+                    pb::Mode::Audit,
+                    pb::FailurePolicy::Closed
+                ))
+                .is_err(),
+                "{why}"
+            );
+        }
+        install_default(&mut e, 500);
+        assert_eq!(e.sandbox_default().unwrap().cgroup_id, 500);
+        assert_eq!(e.gc(&HashSet::from([1])).unwrap(), 1);
+        assert!(e.sandbox_default().is_none());
+        assert!(e.maps.state.cgroups.is_empty());
+    }
+
+    #[test]
+    fn sandbox_default_replaces_an_adopted_entry() {
+        let mut e = engine(resolver());
+        let mut found = MapState::default();
+        found.cgroups.insert(500, CgroupPolicy::default());
+        e.maps.state = found.clone();
+        e.adopt(found, abi::global_mode::NORMAL, 0);
+        install_default(&mut e, 500);
+        assert!(e.adopted_cgroups().is_empty());
+        assert_eq!(e.maps.state.cgroups[&500].flags, abi::CGF_PENDING);
+    }
+
+    #[test]
+    fn bind_outside_the_pod_cgroup_is_warned() {
+        let mut e = engine(resolver());
+        install_default(&mut e, 500);
+        let mut b = bind("c9", 0, 0);
+        b.cgroup_path = "/elsewhere/c9".into();
+        let t = e.bind_prepare(&b).unwrap();
+        let out = e.bind_complete(&t, 900).unwrap();
+        assert!(
+            out.warnings.iter().any(|w| w.contains("pod cgroup")),
+            "{:?}",
+            out.warnings
+        );
+    }
+
+    #[test]
+    fn no_floor_without_adoption() {
+        let mut e = engine(resolver());
+        e.apply(&apply(1, vec![])).unwrap();
+        assert_eq!(e.adopted_generation(), 0);
+        assert!(e.adopted_cgroups().is_empty());
     }
 
     #[test]
@@ -1310,7 +1618,7 @@ mod tests {
         let mut e = engine(resolver());
         let found = adopted_state();
         e.maps.state = found.clone();
-        e.adopt(found, abi::global_mode::NORMAL);
+        e.adopt(found, abi::global_mode::NORMAL, 0);
 
         let t = e.bind_prepare(&bind("c9", 0, 0)).unwrap();
         e.bind_complete(&t, 500).unwrap();
@@ -1338,7 +1646,7 @@ mod tests {
         let mut e = engine(resolver());
         let found = adopted_state();
         e.maps.state = found.clone();
-        e.adopt(found, abi::global_mode::NORMAL);
+        e.adopt(found, abi::global_mode::NORMAL, 0);
         e.apply(&apply(
             10,
             vec![bundle(3, pb::Mode::Enforce, pb::FailurePolicy::Closed)],

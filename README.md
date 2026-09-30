@@ -16,7 +16,7 @@ Pre-release (0.1.0-dev). The Phase 0/1 components are implemented, build, and pa
 |---|---|
 | BPF programs (`bpf/`): P1 exec audit, P2 exec LSM, N1 egress connect4/6 | Implemented. Builds for x86_64 and arm64; smoke-tested on a 7.0 kernel with the bpf LSM |
 | `vesta-guestd` (`guest/`) | Implemented: load/attach/pin, policy maps, container binding, CTRL/EVT channel, heartbeats, replay buffer |
-| `vesta-agent` (`host/cmd/vesta-agent`) | Implemented: NRI plugin with start gate, sandbox sessions over vsock, event export (JSON lines), metrics. Static policy file only; no CRD controllers yet |
+| `vesta-agent` (`host/cmd/vesta-agent`) | Implemented: NRI plugin with start gate, sandbox sessions over vsock, event export (JSON lines), metrics. Policies from a static file or from `VestaPolicy` objects (CRD, dynamic informer), hot-reloaded into running guests; per-node status |
 | `vesta-install` (`host/cmd/vesta-install`) | Implemented: guest assets, runtime config, containerd drop-in with rollback, node label, uninstall |
 | Guest kernel fragment and rootfs recipe (`images/guest/`) | Fragment merge checked with Kata's `build-kernel.sh`; the full kernel and osbuilder image builds have not been run here |
 | Helm chart (`deploy/`) | Lints and validates against the Kubernetes 1.34 schemas |
@@ -55,6 +55,6 @@ make guest-kernel guest-rootfs guest-stage image-install   # guest kernel/image 
 | `test/` | ABI check, BPF and e2e suites | Apache-2.0 |
 | `docs/` | Architecture, ABI, upstream compatibility notes ([docs/compat/kata-4.2.md](docs/compat/kata-4.2.md)) | Apache-2.0 |
 
-The repo has one Go module at the root, `github.com/dbcrit/vesta`. The module path is a placeholder. Linux-specific builds and tests run in Docker, e.g. `hack/go-docker.sh go test ./...`.
+The repo has one Go module at the root, `github.com/dbcrit/vesta`. Linux-specific builds and tests run in Docker, e.g. `hack/go-docker.sh go test ./...`.
 
 License texts are in `LICENSE` (Apache-2.0) and `LICENSES/`.

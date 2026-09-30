@@ -1367,7 +1367,7 @@ const file_vesta_event_v1_event_proto_rawDesc = "" +
 	"\vRuleVerdict\x12\x1c\n" +
 	"\x18RULE_VERDICT_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12RULE_VERDICT_ALLOW\x10\x01\x12\x15\n" +
-	"\x11RULE_VERDICT_DENY\x10\x02B>Z<github.com/dbcrit/vesta/api/gen/go/vesta/event/v1;eventv1b\x06proto3"
+	"\x11RULE_VERDICT_DENY\x10\x02B;Z9github.com/dbcrit/vesta/api/gen/go/vesta/event/v1;eventv1b\x06proto3"
 
 var (
 	file_vesta_event_v1_event_proto_rawDescOnce sync.Once

@@ -13,6 +13,7 @@ use std::rc::Rc;
 use tokio::sync::Notify;
 
 use crate::abi::{CgroupPolicy, ExecKey, NetKeyV4, NetKeyV6, RuleValue};
+use crate::cgwatch::CgroupWaits;
 use crate::config::Config;
 use crate::events::EventHub;
 use crate::proto::channel as pb;
@@ -120,6 +121,8 @@ pub struct Daemon {
     pub engine: Engine<Box<dyn PolicyMaps>>,
     pub bpf: Box<dyn BpfControl>,
     pub cgroups: Box<dyn CgroupLookup>,
+    /// Cgroup paths pending binds wait for (cgwatch).
+    pub cgroup_waits: CgroupWaits,
     pub hub: EventHub,
     /// Woken when new events are buffered.
     pub events_ready: Rc<Notify>,

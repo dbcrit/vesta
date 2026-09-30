@@ -1,0 +1,21 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- /* Kept out of configmap.yaml: the DaemonSet's checksum/config covers that file only,
+     so a policy change reaches the agents through the mounted volume without a restart. */ -}}
+{{- if and .Values.staticPolicies (ne .Values.policies.source "kubernetes") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vesta.fullname" . }}-policies
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+data:
+  policies.yaml: |
+    {{- range $i, $p := .Values.staticPolicies }}
+    {{- if or (ne $p.apiVersion "vesta.dev/v1alpha1") (ne $p.kind "VestaPolicy") }}
+    {{- fail (printf "staticPolicies[%d] must be apiVersion vesta.dev/v1alpha1, kind VestaPolicy" $i) }}
+    {{- end }}
+    ---
+    {{- toYaml $p | nindent 4 }}
+    {{- end }}
+{{- end }}

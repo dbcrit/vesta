@@ -14,6 +14,7 @@ import (
 
 	"github.com/dbcrit/vesta/api/channel"
 	channelv1 "github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1"
+	v1alpha1 "github.com/dbcrit/vesta/api/v1alpha1"
 	"github.com/dbcrit/vesta/host/internal/events"
 	"github.com/dbcrit/vesta/host/internal/metrics"
 	"github.com/dbcrit/vesta/host/internal/policy"
@@ -124,6 +125,8 @@ type Session struct {
 
 	cancel context.CancelFunc
 	done   chan struct{}
+	// reload is signalled (non-blocking, capacity 1) when the policy set changes.
+	reload chan struct{}
 
 	mu                  sync.Mutex
 	st                  state
@@ -133,6 +136,7 @@ type Session struct {
 	hello               *channelv1.HelloReply
 	features            map[string]bool
 	appliedGen          uint64
+	appliedSet          *policy.Set // the set appliedGen was sent from
 	applyErr            error
 	containers          map[string]*boundContainer
 	lastSeq             uint64 // highest event seq received
@@ -158,6 +162,7 @@ func newSession(cfg *Config, info events.SandboxInfo, set *policy.Set) *Session 
 		log:        cfg.Log.With("sandbox", info.SandboxID, "namespace", info.PodNamespace, "pod", info.PodName),
 		source:     cfg.Pipeline.NewSource(),
 		done:       make(chan struct{}),
+		reload:     make(chan struct{}, 1),
 		changed:    make(chan struct{}),
 		containers: make(map[string]*boundContainer),
 		hb:         newHBMonitor(cfg.HeartbeatGrace, time.Now()),
@@ -298,10 +303,13 @@ func (s *Session) connectOnce(ctx context.Context) error {
 	}
 	s.recordHello(reply)
 
-	if err := s.applyPolicy(ctx, cc, reply); err != nil {
+	if err := s.applyPolicy(ctx, cc, reply.GetAppliedGeneration(), reply.GetAdoptedGeneration()); err != nil {
 		return err
 	}
 	if err := s.syncMode(ctx, cc, reply); err != nil {
+		return err
+	}
+	if err := s.syncSandboxDefault(ctx, cc); err != nil {
 		return err
 	}
 
@@ -334,13 +342,24 @@ func (s *Session) connectOnce(ctx context.Context) error {
 
 	var result error
 	evtFinished := false
-	select {
-	case <-ctx.Done():
-	case <-cc.Done():
-		result = fmt.Errorf("control connection: %w", cc.Err())
-	case err := <-evtDone:
-		evtFinished = true
-		result = fmt.Errorf("event stream: %w", err)
+wait:
+	for {
+		select {
+		case <-ctx.Done():
+			break wait
+		case <-cc.Done():
+			result = fmt.Errorf("control connection: %w", cc.Err())
+			break wait
+		case err := <-evtDone:
+			evtFinished = true
+			result = fmt.Errorf("event stream: %w", err)
+			break wait
+		case <-s.reload:
+			if err := s.reapply(ctx, cc); err != nil {
+				result = fmt.Errorf("policy reload: %w", err)
+				break wait
+			}
+		}
 	}
 	s.mu.Lock()
 	s.ctrl = nil
@@ -434,17 +453,16 @@ func (s *Session) appliedGeneration() uint64 {
 }
 
 // applyPolicy sends the policy set. The generation must never go below
-// what the guest already applied (it rejects lower ones), so after an agent
-// restart with an older clock it continues from the guest's generation.
-func (s *Session) applyPolicy(ctx context.Context, cc *ctrlConn, r *channelv1.HelloReply) error {
-	gen := s.set.Generation
-	if applied := r.GetAppliedGeneration(); applied > gen {
-		gen = applied + 1
-	}
+// what the guest already applied, or what a restarted guestd adopted from
+// its predecessor (it rejects lower ones), so after an agent restart with an
+// older clock it continues above the guest's generation.
+func (s *Session) applyPolicy(ctx context.Context, cc *ctrlConn, applied, adopted uint64) error {
+	set := s.policies()
+	gen := nextGeneration(set.Generation, applied, adopted)
 	rctx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
 	resp, err := cc.Call(rctx, &channelv1.ControlRequest{Body: &channelv1.ControlRequest_ApplyPolicy{ApplyPolicy: &channelv1.ApplyPolicy{
-		Generation: gen, Bundles: s.set.Bundles(),
+		Generation: gen, Bundles: set.Bundles(),
 	}}})
 	if err != nil {
 		return fmt.Errorf("apply policy: %w", err)
@@ -475,6 +493,7 @@ func (s *Session) applyPolicy(ctx context.Context, cc *ctrlConn, r *channelv1.He
 	s.applyErr = applyErr
 	if applyErr == nil {
 		s.appliedGen = gen
+		s.appliedSet = set
 	}
 	lag := 0.0
 	if applyErr != nil {
@@ -507,6 +526,137 @@ func (s *Session) syncMode(ctx context.Context, cc *ctrlConn, r *channelv1.Hello
 		s.log.Error("guest did not accept global mode", "mode", want.String())
 	}
 	return nil
+}
+
+// policyUse counts containers per policy id, and reports whether set is the
+// one in force on the guest.
+func (s *Session) policyUse(set *policy.Set) (map[uint32]int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	use := map[uint32]int{}
+	for _, c := range s.containers {
+		if c.policy != 0 {
+			use[c.policy]++
+		}
+	}
+	return use, s.st == stateReady && s.appliedSet == set && s.applyErr == nil
+}
+
+// policies returns the current policy set.
+func (s *Session) policies() *policy.Set {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.set
+}
+
+// setPolicies swaps the policy set; a ready session re-applies it on its own
+// goroutine, a connecting one picks it up in its handshake.
+func (s *Session) setPolicies(set *policy.Set) {
+	s.mu.Lock()
+	s.set = set
+	s.mu.Unlock()
+	select {
+	case s.reload <- struct{}{}:
+	default:
+	}
+}
+
+// reapply pushes a changed policy set over a live channel: ApplyPolicy, the
+// sandbox default, then every known container re-bound with its re-resolved
+// policy. Policy ids are stable across reloads (policy.CompileWith), so
+// between the ApplyPolicy and the re-binds an existing binding keeps its own
+// policy's new rules, or becomes monitor-only if that policy was removed.
+func (s *Session) reapply(ctx context.Context, cc *ctrlConn) error {
+	if err := s.applyPolicy(ctx, cc, s.appliedGeneration(), 0); err != nil {
+		return err
+	}
+	if err := s.syncSandboxDefault(ctx, cc); err != nil {
+		return err
+	}
+	set := s.policies()
+	s.mu.Lock()
+	info := s.info
+	rebind := make([]*boundContainer, 0, len(s.containers))
+	changed := 0
+	for _, c := range s.containers {
+		m := set.Resolve(info.PodNamespace, info.PodLabels, c.Info.Name)
+		var id uint32
+		if m.Policy != nil {
+			id = m.Policy.ID
+		}
+		if id != c.policy {
+			changed++
+		}
+		c.Policy, c.policy = m.Policy, id
+		rebind = append(rebind, c)
+	}
+	gen := s.appliedGen
+	s.mu.Unlock()
+	for _, c := range rebind {
+		rctx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+		err := s.sendBind(rctx, cc, c)
+		cancel()
+		if err != nil {
+			s.log.Warn("re-bind after policy reload failed", "container", c.Info.ID, "err", err)
+		}
+	}
+	s.log.Info("policy set reloaded", "generation", gen, "containers", len(rebind), "policy_changed", changed)
+	return nil
+}
+
+// syncSandboxDefault installs (or clears) the guest's default entry for this
+// pod's unbound container cgroups. It is sent on every connect, so it also
+// replaces whatever a restarted guestd adopted. A guest that cannot install
+// it does not fail the session: the NRI start gate still enforces Closed for
+// every container vesta sees.
+func (s *Session) syncSandboxDefault(ctx context.Context, cc *ctrlConn) error {
+	mode, failure := s.policies().SandboxDefault(s.info.PodNamespace, s.info.PodLabels)
+	parent := s.info.CgroupParent
+	if parent == "" || len(parent) > maxCgroupParent {
+		if failure == v1alpha1.FailureClosed {
+			s.log.Warn("no usable pod cgroup parent from the runtime; unbound container cgroups are not covered by a sandbox default",
+				"cgroup_parent_len", len(parent))
+		}
+		return nil
+	}
+	req := &channelv1.SetSandboxDefault{CgroupParent: parent, Mode: modeProto(mode), Failure: failureProto(failure)}
+	rctx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+	defer cancel()
+	resp, err := cc.Call(rctx, &channelv1.ControlRequest{Body: &channelv1.ControlRequest_SetSandboxDefault{SetSandboxDefault: req}})
+	if err != nil {
+		return fmt.Errorf("set sandbox default: %w", err)
+	}
+	switch b := resp.GetBody().(type) {
+	case *channelv1.ControlResponse_Ack:
+		if !b.Ack.GetOk() {
+			s.log.Error("guest did not install the sandbox default", "failure", failure, "error", fmt.Sprintf("%.1024s", b.Ack.GetError()))
+		} else if failure == v1alpha1.FailureClosed {
+			s.log.Info("sandbox default installed: unbound container cgroups are denied exec and connect")
+		}
+	case *channelv1.ControlResponse_Error:
+		s.log.Error("guest rejected the sandbox default", "failure", failure, "code", b.Error.GetCode().String(), "error", fmt.Sprintf("%.1024s", b.Error.GetMessage()))
+	default:
+		s.cfg.Metrics.ProtocolErrors.WithLabelValues("ctrl").Inc()
+		return &ProtocolError{Msg: fmt.Sprintf("unexpected sandbox default response %T", b)}
+	}
+	return nil
+}
+
+// maxCgroupParent is SetSandboxDefault.cgroup_parent's limit.
+const maxCgroupParent = 4096
+
+func modeProto(m v1alpha1.Mode) channelv1.Mode {
+	if m == v1alpha1.ModeEnforce {
+		return channelv1.Mode_MODE_ENFORCE
+	}
+	return channelv1.Mode_MODE_AUDIT
+}
+
+func failureProto(f v1alpha1.FailurePolicy) channelv1.FailurePolicy {
+	if f == v1alpha1.FailureClosed {
+		return channelv1.FailurePolicy_FAILURE_POLICY_CLOSED
+	}
+	return channelv1.FailurePolicy_FAILURE_POLICY_OPEN
 }
 
 // Bind registers a container and, once the channel is ready, sends its
@@ -586,9 +736,11 @@ func (s *Session) waitReady(ctx context.Context) (*ctrlConn, error) {
 // sendBind sends a BindContainer within ctx (an NRI hook's gate context must
 // bound the write, not only the wait) and waits for the ack in the background.
 func (s *Session) sendBind(ctx context.Context, cc *ctrlConn, bc *boundContainer) error {
-	gen := s.appliedGeneration()
+	s.mu.Lock()
+	gen, policyID := s.appliedGen, bc.policy
+	s.mu.Unlock()
 	id, ch, err := cc.Start(ctx, &channelv1.ControlRequest{Body: &channelv1.ControlRequest_BindContainer{BindContainer: &channelv1.BindContainer{
-		ContainerId: bc.Info.ID, CgroupPath: bc.CgroupPath, PolicyId: bc.policy,
+		ContainerId: bc.Info.ID, CgroupPath: bc.CgroupPath, PolicyId: policyID,
 		Rootfs: channelv1.RootfsType_ROOTFS_TYPE_UNKNOWN, Generation: gen,
 	}}})
 	if err != nil {
@@ -698,12 +850,12 @@ func (s *Session) Container(id string) (events.ContainerInfo, bool) {
 // Policy implements events.Lookup.
 func (s *Session) Policy(generation uint64, id uint32) (events.PolicyInfo, bool) {
 	s.mu.Lock()
-	gen := s.appliedGen
+	gen, set := s.appliedGen, s.appliedSet
 	s.mu.Unlock()
 	if generation != gen {
 		return events.PolicyInfo{}, false
 	}
-	p, ok := s.set.ByID(id)
+	p, ok := set.ByID(id)
 	if !ok {
 		return events.PolicyInfo{}, false
 	}
@@ -760,4 +912,18 @@ func (s *Session) metricLabels() []string {
 func (s *Session) forgetMetrics() {
 	s.cfg.Metrics.HeartbeatAge.DeleteLabelValues(s.metricLabels()...)
 	s.cfg.Metrics.PolicyGenerationLag.DeleteLabelValues(s.metricLabels()...)
+}
+
+// nextGeneration picks the ApplyPolicy generation. An equal applied
+// generation is a no-op on the guest (same policy set after a reconnect).
+// An adopted generation equal to ours is applied again; a higher one came
+// from a different policy set, so ours goes above it.
+func nextGeneration(want, applied, adopted uint64) uint64 {
+	switch {
+	case applied > want:
+		return applied + 1
+	case applied == 0 && adopted > want:
+		return adopted + 1
+	}
+	return want
 }

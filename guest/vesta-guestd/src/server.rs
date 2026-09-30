@@ -186,7 +186,7 @@ struct Loaded {
     control: Box<dyn BpfControl>,
     events: Option<MapHandle>,
     seq: Option<crate::bpf::SeqMap>,
-    adopted: Option<(crate::state::MapState, u32)>,
+    adopted: Option<(crate::state::MapState, u32, u64)>,
 }
 
 /// Loads the object, then writes `config` and reads adopted state, and only
@@ -232,7 +232,7 @@ fn load_bpf(cfg: &Config, info: &GuestInfo) -> anyhow::Result<Loaded> {
             policy_ready = ready,
             "adopted maps pinned by a previous guestd"
         );
-        Some((state, mode))
+        Some((state, mode, ready))
     } else {
         None
     };
@@ -304,8 +304,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.baseline_abi(),
         enforce,
     );
-    if let Some((state, mode)) = loaded.adopted {
-        engine.adopt(state, mode);
+    if let Some((state, mode, ready)) = loaded.adopted {
+        engine.adopt(state, mode, ready);
     }
     engine.set_protected_cgroups(protected_cgroups(&cfg));
     let mut hub = EventHub::new(cfg.replay_max_events, cfg.replay_max_bytes);
@@ -334,6 +334,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         engine,
         bpf: loaded.control,
         cgroups: Box::new(cgroups),
+        cgroup_waits: crate::cgwatch::CgroupWaits::default(),
         events_ready: Rc::new(Notify::new()),
         heartbeat_seq: 0,
         pending_binds: 0,
@@ -360,6 +361,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     tokio::task::spawn_local(listen(d.clone(), ctrl_port, Channel::Ctrl));
     tokio::task::spawn_local(listen(d.clone(), evt_port, Channel::Evt));
     tokio::task::spawn_local(gc_loop(d.clone()));
+    tokio::task::spawn_local(crate::cgwatch::run(d.clone()));
 
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;

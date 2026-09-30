@@ -40,11 +40,17 @@ RUN apk add --no-cache \
 	&& ar d /opt/vesta/lib/libelf.a crc32.o \
 	&& ln -s /usr/lib/libz.a /opt/vesta/lib/libz.a
 
-# x86_64-unknown-linux-musl links statically (crt-static) by default.
+# *-unknown-linux-musl links statically (crt-static) by default. The image is
+# multi-arch; aarch64 builds run it as linux/arm64 (guest/hack/in-builder.sh).
+# GCC on aarch64 turns C atomics into calls to libgcc's __aarch64_* helpers
+# (outline atomics); Rust links with -nodefaultlibs, so libbpf is compiled with
+# inline atomics instead (cc crate: CFLAGS_<target>).
 # libbpf-sys links libelf.a from LIBBPF_SYS_LIBRARY_PATH (the patched copy); Alpine's libelf.a
 # is built with zstd, so libzstd.a is linked too.
 ENV CARGO_HOME=/usr/local/cargo \
 	PROTOC=/usr/bin/protoc \
 	LIBBPF_SYS_LIBRARY_PATH=/opt/vesta/lib \
-	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-l:libzstd.a"
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-l:libzstd.a" \
+	CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-l:libzstd.a" \
+	CFLAGS_aarch64_unknown_linux_musl="-mno-outline-atomics"
 WORKDIR /src

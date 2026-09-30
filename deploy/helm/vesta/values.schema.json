@@ -272,6 +272,15 @@
               "type": "boolean"
             }
           }
+        },
+        "policyStatusPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          }
         }
       }
     },
@@ -352,6 +361,27 @@
       "properties": {
         "image": {
           "$ref": "#/definitions/image"
+        }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": [
+            "static",
+            "kubernetes"
+          ]
+        },
+        "reloadInterval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h)$"
+        },
+        "syncTimeout": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m|h)$"
         }
       }
     }

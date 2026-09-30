@@ -1,0 +1,58 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- if and .Values.rbac.create .Values.rbac.policyStatusPolicy.enabled (eq .Values.policies.source "kubernetes") }}
+{{- $name := printf "%s-policy-status" (include "vesta.fullname" .) }}
+{{- $user := printf "system:serviceaccount:%s:%s" .Release.Namespace (include "vesta.serviceAccountName" .) }}
+# VestaPolicy status writes by the vesta service account may only add, change
+# or remove the status.nodes entry of the node the token was issued for
+# (bound service account tokens carry the node name since Kubernetes 1.30).
+# Every agent shares one service account, so RBAC alone would let a
+# compromised node rewrite the status reported by the others.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["vesta.dev"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["vestapolicies/status"]
+  matchConditions:
+    - name: vesta-service-account
+      expression: request.userInfo.username == {{ $user | quote }}
+  variables:
+    - name: tokenNode
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+    - name: newOthers
+      expression: >-
+        (has(object.status) && has(object.status.nodes) ? object.status.nodes : [])
+        .filter(n, n.node != variables.tokenNode)
+    - name: oldOthers
+      expression: >-
+        (has(oldObject.status) && has(oldObject.status.nodes) ? oldObject.status.nodes : [])
+        .filter(n, n.node != variables.tokenNode)
+  validations:
+    - expression: variables.tokenNode != ''
+      message: vesta-agent status writes need a node-bound service account token
+    - expression: >-
+        size(variables.newOthers) == size(variables.oldOthers) &&
+        variables.newOthers.all(n, variables.oldOthers.exists(o, o == n))
+      message: vesta-agent may only change the status entry of its own node
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}

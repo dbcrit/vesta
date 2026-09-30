@@ -1,9 +1,9 @@
 {{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
 {{- if .Values.rbac.create }}
-# Only vesta-install talks to the API server: it reads its node (containerd
-# version) and sets the vesta.dev/guest-ready label. vesta-agent gets no
-# token. RBAC cannot scope this to one node or one label; the
-# ValidatingAdmissionPolicy in node-label-policy.yaml does.
+# vesta-install reads its node (containerd version) and sets the
+# vesta.dev/guest-ready label. RBAC cannot scope this to one node or one
+# label; the ValidatingAdmissionPolicy in node-label-policy.yaml does.
+# vesta-agent gets a token only with policies.source kubernetes (below).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -41,4 +41,39 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "vesta.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if eq .Values.policies.source "kubernetes" }}
+---
+# vesta-agent watches VestaPolicy objects and writes its node's entry in
+# their status (server-side apply on the status subresource). The
+# ValidatingAdmissionPolicy in policy-status-policy.yaml keeps each agent to
+# its own node's entry.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vesta.fullname" . }}-agent
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["vesta.dev"]
+    resources: ["vestapolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["vesta.dev"]
+    resources: ["vestapolicies/status"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vesta.fullname" . }}-agent
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "vesta.fullname" . }}-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vesta.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

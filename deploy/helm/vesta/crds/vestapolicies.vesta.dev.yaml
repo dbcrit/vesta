@@ -1,0 +1,194 @@
+# SPDX-License-Identifier: Apache-2.0
+# VestaPolicy (vesta.dev/v1alpha1), matching api/v1alpha1/types.go. vesta-agent
+# re-validates every object (host/internal/policy) and reports objects it
+# rejects in status.nodes[].message; this schema only catches shape errors
+# early. Limits follow api/proto/vesta/channel/v1/control.proto.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vestapolicies.vesta.dev
+  labels:
+    app.kubernetes.io/name: vesta
+spec:
+  group: vesta.dev
+  scope: Namespaced
+  names:
+    kind: VestaPolicy
+    listKind: VestaPolicyList
+    plural: vestapolicies
+    singular: vestapolicy
+    shortNames: [vpol]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Failure
+          type: string
+          jsonPath: .spec.failurePolicy
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            Policy for Kata pods (vesta runtime class) selected in the policy's
+            namespace, enforced by BPF programs in each pod's guest kernel.
+          required: [spec]
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required: [selector]
+              properties:
+                selector:
+                  type: object
+                  description: Pods in this namespace; {} selects every vesta pod.
+                  properties:
+                    matchLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    matchExpressions:
+                      type: array
+                      maxItems: 64
+                      items:
+                        type: object
+                        required: [key, operator]
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [In, NotIn, Exists, DoesNotExist]
+                          values:
+                            type: array
+                            items:
+                              type: string
+                containerSelector:
+                  type: object
+                  description: Narrows the policy to named containers. Omit for all containers.
+                  required: [names]
+                  properties:
+                    names:
+                      type: array
+                      minItems: 1
+                      maxItems: 64
+                      items:
+                        type: string
+                        maxLength: 63
+                mode:
+                  type: string
+                  enum: [Audit, Enforce]
+                  default: Audit
+                failurePolicy:
+                  type: string
+                  enum: [Open, Closed]
+                  default: Open
+                process:
+                  type: object
+                  properties:
+                    default:
+                      type: string
+                      enum: [Allow, Deny]
+                    allow:
+                      type: array
+                      maxItems: 4096
+                      items:
+                        type: object
+                        required: [path]
+                        properties:
+                          path:
+                            type: string
+                            maxLength: 4096
+                            pattern: '^/'
+                    deny:
+                      type: array
+                      maxItems: 4096
+                      items:
+                        type: object
+                        required: [path]
+                        properties:
+                          path:
+                            type: string
+                            maxLength: 4096
+                            pattern: '^/'
+                    denyNonImageExec:
+                      type: boolean
+                      description: Drift prevention. Not supported yet; true is rejected by vesta-agent.
+                network:
+                  type: object
+                  properties:
+                    egressDefault:
+                      type: string
+                      enum: [Allow, Deny]
+                    egress:
+                      type: array
+                      maxItems: 1024
+                      items:
+                        type: object
+                        required: [cidr]
+                        properties:
+                          cidr:
+                            type: string
+                            maxLength: 64
+                          ports:
+                            type: array
+                            maxItems: 64
+                            items:
+                              type: integer
+                              format: int32
+                              minimum: 1
+                              maximum: 65535
+                          protocol:
+                            type: string
+                            enum: ["", TCP, UDP]
+                          action:
+                            type: string
+                            enum: [Allow, Deny]
+            status:
+              type: object
+              properties:
+                nodes:
+                  type: array
+                  description: >-
+                    One entry per node, written by that node's vesta-agent
+                    with server-side apply.
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [node]
+                  items:
+                    type: object
+                    required: [node]
+                    properties:
+                      node:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      accepted:
+                        type: boolean
+                      message:
+                        type: string
+                        maxLength: 1024
+                      sandboxes:
+                        type: integer
+                        format: int64
+                        description: Vesta sandboxes on the node with a container the policy selects.
+                      programmed:
+                        type: integer
+                        format: int64
+                        description: Of those, sandboxes whose guest applied the current policy set.
+                      containers:
+                        type: integer
+                        format: int64

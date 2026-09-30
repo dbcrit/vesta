@@ -34,8 +34,61 @@ func NewRegistry(ctx context.Context, cfg Config, set *policy.Set) *Registry {
 	return &Registry{cfg: &cfg, set: set, ctx: ctx, sessions: make(map[string]*Session)}
 }
 
-// Policies returns the compiled policy set.
-func (r *Registry) Policies() *policy.Set { return r.set }
+// Policies returns the current compiled policy set.
+func (r *Registry) Policies() *policy.Set {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.set
+}
+
+// PolicyStats is one policy's use on this node.
+type PolicyStats struct {
+	// Sandboxes have at least one container the policy selects.
+	Sandboxes int
+	// Programmed of those have the set in force (ApplyPolicy acked).
+	Programmed int
+	Containers int
+}
+
+// PolicyStats reports, per policy id of set, how many sandboxes and
+// containers use it and how many of those sandboxes have set applied.
+func (r *Registry) PolicyStats(set *policy.Set) map[uint32]PolicyStats {
+	r.mu.Lock()
+	all := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		all = append(all, s)
+	}
+	r.mu.Unlock()
+	out := map[uint32]PolicyStats{}
+	for _, s := range all {
+		use, programmed := s.policyUse(set)
+		for id, n := range use {
+			st := out[id]
+			st.Sandboxes++
+			st.Containers += n
+			if programmed {
+				st.Programmed++
+			}
+			out[id] = st
+		}
+	}
+	return out
+}
+
+// SetPolicies swaps the policy set and pushes it to every session. Sessions
+// created afterwards start with it.
+func (r *Registry) SetPolicies(set *policy.Set) {
+	r.mu.Lock()
+	r.set = set
+	all := make([]*Session, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		all = append(all, s)
+	}
+	r.mu.Unlock()
+	for _, s := range all {
+		s.setPolicies(set)
+	}
+}
 
 // Ensure returns the session for info.SandboxID, creating and starting it
 // if needed. It never blocks on the guest.

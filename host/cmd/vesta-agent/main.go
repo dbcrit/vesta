@@ -14,8 +14,12 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 
 	channelv1 "github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1"
 	"github.com/dbcrit/vesta/host/internal/agentconfig"
@@ -24,6 +28,7 @@ import (
 	"github.com/dbcrit/vesta/host/internal/metrics"
 	"github.com/dbcrit/vesta/host/internal/nriplugin"
 	"github.com/dbcrit/vesta/host/internal/policy"
+	"github.com/dbcrit/vesta/host/internal/policysource"
 	"github.com/dbcrit/vesta/host/internal/sandbox"
 	"github.com/dbcrit/vesta/host/internal/transport"
 )
@@ -61,6 +66,23 @@ func globalMode(s string) channelv1.GlobalMode {
 	}
 }
 
+// kubeSource watches VestaPolicy objects with the pod's service account.
+func kubeSource(node string, reg *sandbox.Registry, m *metrics.Metrics, log *slog.Logger) (*policysource.Kube, error) {
+	rc, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes policy source: %w", err)
+	}
+	rc.UserAgent = "vesta-agent/" + version
+	client, err := dynamic.NewForConfig(rc)
+	if err != nil {
+		return nil, fmt.Errorf("kubernetes policy source: %w", err)
+	}
+	return &policysource.Kube{
+		Client: client, Status: policysource.DynamicStatus{Client: client, Node: node},
+		Stats: reg, Node: node, Metrics: m, Log: log,
+	}, nil
+}
+
 func run(args []string) error {
 	cfg, err := agentconfig.Load(args, os.Getenv)
 	if err != nil {
@@ -70,25 +92,38 @@ func run(args []string) error {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(cfg.LogLevel)}))
 	slog.SetDefault(log)
 
-	var set *policy.Set
-	if cfg.PolicyFile != "" {
-		set, err = policy.LoadFile(cfg.PolicyFile, 0, time.Now())
-		if err != nil {
+	m := metrics.New()
+	source := cfg.EffectivePolicySource()
+	var (
+		set        *policy.Set
+		fileSource *policysource.File
+		fileDigest [32]byte
+	)
+	switch source {
+	case agentconfig.PolicySourceFile:
+		fileSource = &policysource.File{
+			Path: cfg.PolicyFile, Interval: cfg.PolicyReloadInterval.Duration,
+			Metrics: m, Log: log.With("component", "policy"),
+		}
+		// An invalid file at startup is fatal; later changes that are invalid
+		// keep the running set.
+		if set, fileDigest, err = fileSource.Load(); err != nil {
 			return err
 		}
-	} else {
-		set, err = policy.Compile(nil, uint64(time.Now().UnixMilli()))
-		if err != nil {
+	default:
+		// Kubernetes: empty until the first VestaPolicy sync.
+		if set, err = policy.Compile(nil, policy.NextGeneration(0, time.Now())); err != nil {
 			return err
 		}
 	}
+	m.PoliciesLoaded.Set(float64(len(set.Policies)))
+	m.PolicySetGeneration.Set(float64(set.Generation))
 	log.Info("starting vesta-agent", "version", version, "node", cfg.NodeName, "handlers", cfg.Handlers,
-		"policies", len(set.Policies), "generation", set.Generation, "global_mode", cfg.GlobalMode)
+		"policy_source", source, "policies", len(set.Policies), "generation", set.Generation, "global_mode", cfg.GlobalMode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	m := metrics.New()
 	exporter := events.NewJSONLines(os.Stdout)
 	pipeline := events.NewPipeline(events.PipelineConfig{
 		QueueSize: cfg.EventQueue, PerSandboxRate: cfg.EventRate, PerSandboxBurst: cfg.EventBurst,
@@ -128,7 +163,49 @@ func run(args []string) error {
 	wg.Add(1)
 	go func() { defer wg.Done(); reg.RunMonitor(ctx, time.Second) }()
 
-	errc := make(chan error, 2)
+	errc := make(chan error, 3)
+	var policiesSynced atomic.Bool
+	switch source {
+	case agentconfig.PolicySourceFile:
+		policiesSynced.Store(true)
+		wg.Add(1)
+		go func() { defer wg.Done(); fileSource.Run(ctx, reg, fileDigest) }()
+	case agentconfig.PolicySourceKubernetes:
+		kube, err := kubeSource(cfg.NodeName, reg, m, log.With("component", "policy"))
+		if err != nil {
+			stop()
+			reg.Close()
+			cancelPipeline()
+			wg.Wait()
+			return err
+		}
+		synced := make(chan struct{})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := kube.Run(ctx, reg, synced); err != nil && ctx.Err() == nil {
+				errc <- fmt.Errorf("VestaPolicy watch: %w", err)
+			}
+		}()
+		// Hold NRI back until the policies are known, so containers created
+		// right after an agent start are gated with the right failure policy.
+		select {
+		case <-synced:
+			policiesSynced.Store(true)
+		case <-time.After(cfg.PolicySyncTimeout.Duration):
+			log.Warn("VestaPolicy sync not complete; starting NRI with no policies", "timeout", cfg.PolicySyncTimeout.Duration)
+			go func() {
+				select {
+				case <-synced:
+					policiesSynced.Store(true)
+				case <-ctx.Done():
+				}
+			}()
+		case <-ctx.Done():
+		}
+	default:
+		policiesSynced.Store(true)
+	}
 	if cfg.MetricsAddr != "" {
 		wg.Add(1)
 		go func() {
@@ -136,6 +213,9 @@ func run(args []string) error {
 			ready := func() error {
 				if !plugin.Registered() {
 					return errors.New("NRI plugin not registered")
+				}
+				if !policiesSynced.Load() {
+					return errors.New("VestaPolicy objects not synced")
 				}
 				return nil
 			}

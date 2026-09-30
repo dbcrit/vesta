@@ -56,7 +56,8 @@ Values you are likely to need (all values: [Configuration](configuration.md#helm
 | Kubelet root is not `/var/lib/kubelet` | `kubelet.rootDir=<dir>` |
 | Tainted Kata node pool | `tolerations`, and `runtimeClass.tolerations` for workload pods |
 | You manage containerd restarts yourself | `installer.restartContainerd=false`. The installer then fails with "containerd config changed and must be restarted by the operator" and leaves the node unlabelled until a later run finds nothing to change |
-| Static policies | `staticPolicies` (see [Configuration](configuration.md#static-policy-file)) |
+| Static policies | `staticPolicies`; re-read by the agent every `policies.reloadInterval` (10 s) |
+| Policies as Kubernetes objects | `policies.source=kubernetes`, then `kubectl apply` `VestaPolicy` objects (see below) |
 | Prometheus scraping | `metrics.service.enabled=true` or `metrics.podMonitor.enabled=true` (both bind the endpoints to the node IP) |
 
 ### What happens on each node
@@ -78,7 +79,7 @@ Values you are likely to need (all values: [Configuration](configuration.md#helm
 
 ### Plain manifests
 
-`deploy/manifests/` holds `helm template` output with default values, plus the namespace. The images point at `ghcr.io/vesta-dev/...:0.1.0-dev`, so edit them (or use a kustomize image override) before applying:
+`deploy/manifests/` holds `helm template` output with default values, plus the namespace. The images point at `ghcr.io/dbcrit/...:0.1.0-dev`, so edit them (or use a kustomize image override) before applying:
 
 ```sh
 kubectl apply -k deploy/manifests
@@ -174,7 +175,28 @@ On upgrade, vesta-install adds the new guest version next to the old ones under 
 
 A version directory is immutable: if `/opt/vesta/kata/<version>/` already holds a kernel or image with a different SHA-256, the install fails with `refusing to replace an installed version (bump the guest version)`. Rebuild with a new `VERSION` instead of reusing one.
 
-The DaemonSet has a `checksum/config` annotation over the ConfigMaps, so changing `agent.config` or `staticPolicies` with `helm upgrade` restarts the agents. That restart is how a policy or kill-switch change takes effect: there is no hot reload.
+The DaemonSet has a `checksum/config` annotation over the agent config and seccomp ConfigMaps, so changing `agent.config` (for example the kill switch) with `helm upgrade` restarts the agents. Policies are not part of it: a changed `staticPolicies` reaches the agents through the mounted ConfigMap (the kubelet syncs it within about a minute) and is applied without a restart.
+
+## Policies from the Kubernetes API
+
+With `policies.source=kubernetes`, every agent watches `VestaPolicy` objects (`vesta.dev/v1alpha1`, short name `vpol`) in all namespaces and pushes each change to the running guests: `ApplyPolicy`, the sandbox default, then a re-bind of every container with its re-resolved policy. The agent registers its NRI plugin only after the first sync (or after `policies.syncTimeout`), and `/readyz` fails until then.
+
+```sh
+helm upgrade vesta deploy/helm/vesta -n vesta-system --reuse-values --set policies.source=kubernetes
+kubectl apply -f - <<'YAML'
+apiVersion: vesta.dev/v1alpha1
+kind: VestaPolicy
+metadata: {name: web, namespace: shop}
+spec:
+  selector: {matchLabels: {app: web}}
+  mode: Audit
+  process:
+    allow: [{path: /usr/local/bin/web}]
+YAML
+kubectl -n shop get vpol web -o jsonpath='{range .status.nodes[*]}{.node}: accepted={.accepted} sandboxes={.sandboxes} programmed={.programmed}{"\n"}{end}'
+```
+
+Each node's agent reports in `status.nodes[]`: whether it accepted the object (`message` says why not; an invalid object is left out and the others still apply), how many vesta sandboxes on the node have a container the policy selects, and how many of those have the current set applied. The agent then gets a projected service account token, read access to `vestapolicies`, and `patch` on `vestapolicies/status`; a ValidatingAdmissionPolicy (`rbac.policyStatusPolicy`) limits those status writes to the agent's own node entry. Helm installs the CRD from `crds/` on first install only: apply `deploy/helm/vesta/crds/` yourself when a chart upgrade changes it.
 
 ## Uninstall
 

@@ -68,7 +68,8 @@ The containerd drop-in registers handler `kata-qemu-vesta` with `runtime_type = 
 |---|---|---|
 | DaemonSet | `vesta-agent` | Init containers `seccomp-profile` and `vesta-install`, then container `vesta-agent` |
 | RuntimeClass | `kata-qemu-vesta` | `handler: kata-qemu-vesta`, overhead 352Mi / 250m, `scheduling.nodeSelector: vesta.dev/guest-ready: <guestVersion>` |
-| ConfigMaps | `vesta-agent`, `vesta-policies` (only with `staticPolicies`), `vesta-seccomp` | Agent config file, static policies, seccomp profiles |
+| ConfigMaps | `vesta-agent`, `vesta-policies` (only with `staticPolicies`), `vesta-seccomp` | Agent config file, static policies (re-read without a restart), seccomp profiles |
+| CRD | `vestapolicies.vesta.dev` | `VestaPolicy` objects, used with `policies.source=kubernetes` |
 | ServiceAccount | `vesta` | Used only by the installer (projected, pod-bound token). The agent container gets no token |
 | ClusterRole, ClusterRoleBinding | `vesta-installer` | `get`/`patch` on nodes, plus `list` on pods and runtimeclasses in uninstall mode |
 | ValidatingAdmissionPolicy + binding | `vesta-node-label` | Limits the service account's node patches to the `vesta.dev/guest-ready` label on its own node |

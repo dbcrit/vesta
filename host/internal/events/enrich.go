@@ -16,6 +16,10 @@ type SandboxInfo struct {
 	PodNamespace   string
 	PodUID         string
 	RuntimeHandler string
+	// PodLabels and CgroupParent (NRI PodSandbox.linux.cgroup_parent) select
+	// policies and the pod cgroup for the sandbox default. Not exported.
+	PodLabels    map[string]string
+	CgroupParent string
 	// GuestImageVersion and KernelRelease come from the guest's HelloReply
 	// and are guest-asserted; they are length-checked at the handshake.
 	GuestImageVersion string

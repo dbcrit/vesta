@@ -134,6 +134,8 @@ func sandboxInfo(pod *api.PodSandbox) events.SandboxInfo {
 		PodNamespace:   pod.GetNamespace(),
 		PodUID:         pod.GetUid(),
 		RuntimeHandler: pod.GetRuntimeHandler(),
+		PodLabels:      pod.GetLabels(),
+		CgroupParent:   pod.GetLinux().GetCgroupParent(),
 	}
 }
 

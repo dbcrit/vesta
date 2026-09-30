@@ -52,12 +52,21 @@ type Config struct {
 	DefaultFailure v1alpha1.FailurePolicy `json:"defaultFailurePolicy"`
 	GlobalMode     string                 `json:"globalMode"`
 	PolicyFile     string                 `json:"policyFile"`
-	MetricsAddr    string                 `json:"metricsAddr"`
-	LogLevel       string                 `json:"logLevel"`
-	HeartbeatGrace float64                `json:"heartbeatGrace"`
-	EventRate      float64                `json:"eventRatePerSandbox"`
-	EventBurst     int                    `json:"eventBurstPerSandbox"`
-	EventQueue     int                    `json:"eventQueueSize"`
+	// PolicySource is "file" (PolicyFile, reloaded when its content
+	// changes), "kubernetes" (VestaPolicy objects watched through the API
+	// server) or "none". Empty means "file" when PolicyFile is set, else "none".
+	PolicySource string `json:"policySource"`
+	// PolicyReloadInterval is how often the policy file is re-read.
+	PolicyReloadInterval Duration `json:"policyReloadInterval"`
+	// PolicySyncTimeout bounds the wait for the first policy sync from the
+	// API server before the NRI plugin starts.
+	PolicySyncTimeout Duration `json:"policySyncTimeout"`
+	MetricsAddr       string   `json:"metricsAddr"`
+	LogLevel          string   `json:"logLevel"`
+	HeartbeatGrace    float64  `json:"heartbeatGrace"`
+	EventRate         float64  `json:"eventRatePerSandbox"`
+	EventBurst        int      `json:"eventBurstPerSandbox"`
+	EventQueue        int      `json:"eventQueueSize"`
 }
 
 // Default returns the defaults.
@@ -79,7 +88,28 @@ func Default() Config {
 		EventRate:      1000,
 		EventBurst:     2000,
 		EventQueue:     8192,
+
+		PolicyReloadInterval: Duration{10 * time.Second},
+		PolicySyncTimeout:    Duration{30 * time.Second},
 	}
+}
+
+// Policy sources.
+const (
+	PolicySourceNone       = "none"
+	PolicySourceFile       = "file"
+	PolicySourceKubernetes = "kubernetes"
+)
+
+// EffectivePolicySource resolves an empty PolicySource.
+func (c Config) EffectivePolicySource() string {
+	if c.PolicySource != "" {
+		return c.PolicySource
+	}
+	if c.PolicyFile != "" {
+		return PolicySourceFile
+	}
+	return PolicySourceNone
 }
 
 const maxConfigFile = 1 << 20
@@ -208,7 +238,10 @@ func bind(fs *flag.FlagSet, c *Config) {
 	fs.Var(durFlag{&c.GateTimeout}, "gate-timeout", "bound on each NRI hook wait (must stay below the NRI plugin request timeout)")
 	fs.Var(failureFlag{&c.DefaultFailure}, "default-failure-policy", "Open or Closed, for containers no policy selects")
 	fs.StringVar(&c.GlobalMode, "global-mode", c.GlobalMode, "kill switch: Normal, AuditOnly or Detached")
-	fs.StringVar(&c.PolicyFile, "policy-file", c.PolicyFile, "static VestaPolicy YAML file (empty: monitor only)")
+	fs.StringVar(&c.PolicyFile, "policy-file", c.PolicyFile, "VestaPolicy YAML file, reloaded when it changes (policy source \"file\")")
+	fs.StringVar(&c.PolicySource, "policy-source", c.PolicySource, "file, kubernetes or none (default: file if -policy-file is set, else none)")
+	fs.Var(durFlag{&c.PolicyReloadInterval}, "policy-reload-interval", "how often the policy file is re-read")
+	fs.Var(durFlag{&c.PolicySyncTimeout}, "policy-sync-timeout", "bound on the wait for the first VestaPolicy sync before NRI starts")
 	fs.StringVar(&c.MetricsAddr, "metrics-addr", c.MetricsAddr, "listen address for /metrics, /healthz and /readyz (empty disables)")
 	fs.StringVar(&c.LogLevel, "log-level", c.LogLevel, "debug, info, warn or error")
 	fs.Float64Var(&c.HeartbeatGrace, "heartbeat-grace", c.HeartbeatGrace, "alert when no heartbeat arrives within this multiple of the interval")
@@ -276,6 +309,28 @@ func (c Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		errs = append(errs, fmt.Errorf("log level %q", c.LogLevel))
+	}
+	switch src := c.EffectivePolicySource(); src {
+	case PolicySourceNone:
+		if c.PolicyFile != "" {
+			errs = append(errs, errors.New("policy file set but policy source is none"))
+		}
+	case PolicySourceFile:
+		if c.PolicyFile == "" {
+			errs = append(errs, errors.New("policy source file needs -policy-file"))
+		}
+	case PolicySourceKubernetes:
+		if c.PolicyFile != "" {
+			errs = append(errs, errors.New("policy source kubernetes does not use -policy-file"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("policy source %q: want file, kubernetes or none", src))
+	}
+	if c.PolicyReloadInterval.Duration < time.Second {
+		errs = append(errs, errors.New("policy reload interval must be at least 1s"))
+	}
+	if c.PolicySyncTimeout.Duration <= 0 {
+		errs = append(errs, errors.New("policy sync timeout must be positive"))
 	}
 	if c.HeartbeatGrace < 1 {
 		errs = append(errs, errors.New("heartbeat grace must be >= 1"))

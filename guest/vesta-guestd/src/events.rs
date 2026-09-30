@@ -16,6 +16,7 @@ use std::collections::{HashMap, VecDeque};
 use prost::Message;
 
 use crate::abi::{self, evf, Record};
+use crate::ancestry::{self, Ancestry};
 use crate::proto::event as ev;
 
 pub const MAX_BATCH_EVENTS: usize = 512;
@@ -174,7 +175,7 @@ fn heap_size(e: &ev::Event, wire: usize) -> usize {
     if let Some(p) = &e.process {
         n += size_of::<ev::Process>() + p.argv.len() * size_of::<String>();
     }
-    n += e.chain.len() * size_of::<ev::Process>() + e.flags.len() * size_of::<i32>();
+    n += e.chain.len() * size_of::<ev::Ancestor>() + e.flags.len() * size_of::<i32>();
     n
 }
 
@@ -318,6 +319,7 @@ pub struct EventHub {
     pub replay: ReplayBuffer,
     pub containers: HashMap<u64, String>,
     pub decode_errors: u64,
+    ancestry: Ancestry,
     wall_offset_ns: i64,
     seq_store: Option<Box<dyn SeqStore>>,
     /// Highest seq persisted as reserved; `replay` may assign up to this.
@@ -341,6 +343,7 @@ impl EventHub {
             replay: ReplayBuffer::new(max_events, max_bytes),
             containers: HashMap::new(),
             decode_errors: 0,
+            ancestry: Ancestry::new(ancestry::DEFAULT_CAPACITY),
             wall_offset_ns: 0,
             seq_store: None,
             reserved: u64::MAX,
@@ -405,6 +408,25 @@ impl EventHub {
         self.wall_offset_ns = ns(rt).saturating_sub(ns(bt));
     }
 
+    /// Learns from exec events, then fills the chain (and, for non-exec
+    /// events, the executable path when the cache still describes this tgid).
+    fn add_ancestry(&mut self, rec: &Record, event: &mut ev::Event) {
+        let Some(p) = event.process.as_mut() else {
+            return;
+        };
+        match rec {
+            Record::Exec(_) => self.ancestry.exec(p.tgid, p.ppid, &p.comm, &p.exe_path),
+            Record::Connect(_) => {
+                if p.exe_path.is_empty() {
+                    if let Some(path) = self.ancestry.exe_path(p.tgid, p.ppid) {
+                        p.exe_path = path.to_owned();
+                    }
+                }
+            }
+        }
+        event.chain = self.ancestry.chain(p.ppid);
+    }
+
     /// Handles one ring buffer sample. Malformed records are counted, never fatal.
     pub fn ingest(&mut self, sample: &[u8]) {
         match Record::decode(sample) {
@@ -413,12 +435,13 @@ impl EventHub {
                     Record::Exec(e) => e.hdr.cgroup_id,
                     Record::Connect(c) => c.hdr.cgroup_id,
                 };
-                let event = to_event(
+                let mut event = to_event(
                     &rec,
                     0,
                     self.wall_offset_ns,
                     self.containers.get(&cg).map(String::as_str),
                 );
+                self.add_ancestry(&rec, &mut event);
                 self.reserve();
                 self.replay.push(event);
             }
@@ -654,6 +677,62 @@ mod tests {
             self.0.set(reserved);
             Ok(())
         }
+    }
+
+    fn exec_as(tgid: u32, ppid: u32, comm: &[u8], path: &[u8]) -> Vec<u8> {
+        let Record::Exec(mut e) = exec_record(b"x\0", 2, 0) else {
+            unreachable!()
+        };
+        e.hdr.pid = tgid;
+        e.hdr.tgid = tgid;
+        e.hdr.ppid = ppid;
+        e.hdr.comm = [0; 16];
+        e.hdr.comm[..comm.len()].copy_from_slice(comm);
+        e.exec.path = [0; abi::PATH_MAX];
+        e.exec.path[..path.len()].copy_from_slice(path);
+        e.exec.path_len = u16::try_from(path.len()).unwrap();
+        e.to_bytes()
+    }
+
+    #[test]
+    fn hub_fills_chain_and_connect_exe_path() {
+        let mut hub = EventHub::new(10, 1 << 20);
+        hub.ingest(&exec_as(10, 1, b"sh", b"/bin/sh"));
+        hub.ingest(&exec_as(20, 10, b"curl", b"/usr/bin/curl"));
+        let connect = |tgid: u32, ppid: u32| {
+            ConnectEvent {
+                hdr: EventHeader {
+                    abi_version: 1,
+                    r#type: abi::event_type::CONNECT,
+                    size: 120,
+                    pid: tgid,
+                    tgid,
+                    ppid,
+                    ..Default::default()
+                },
+                connect: ConnectPayload {
+                    family: abi::AF_INET,
+                    ..Default::default()
+                },
+            }
+            .to_bytes()
+        };
+        hub.ingest(&connect(20, 10));
+        hub.ingest(&connect(20, 99)); // same pid under another parent: reused
+        let b = hub.replay.batch_from(0);
+        assert_eq!(b.len(), 4);
+
+        let chain = |e: &ev::Event| e.chain.iter().map(|a| a.pid).collect::<Vec<_>>();
+        assert_eq!(chain(&b[0]), vec![1], "init unknown: pid only");
+        assert_eq!(chain(&b[1]), vec![10, 1]);
+        assert_eq!(b[1].chain[0].exe_path, "/bin/sh");
+
+        let p = b[2].process.as_ref().unwrap();
+        assert_eq!(p.exe_path, "/usr/bin/curl");
+        assert_eq!(chain(&b[2]), vec![10, 1]);
+
+        assert!(b[3].process.as_ref().unwrap().exe_path.is_empty());
+        assert_eq!(chain(&b[3]), vec![99]);
     }
 
     fn exec_bytes() -> Vec<u8> {

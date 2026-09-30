@@ -17,7 +17,8 @@ REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 REGISTRY ?= ghcr.io/dbcrit
 # Guest/kernel arch naming (x86_64|aarch64). OCI_ARCH is the image platform
 # arch; BPF_ARCH is bpf/Makefile's output directory name.
-ARCH ?= $(shell uname -m | sed -e 's/^arm64$$/aarch64/' -e 's/^amd64$$/x86_64/')
+HOST_ARCH := $(shell uname -m | sed -e 's/^arm64$$/aarch64/' -e 's/^amd64$$/x86_64/')
+ARCH ?= $(HOST_ARCH)
 OCI_ARCH := $(if $(filter aarch64,$(ARCH)),arm64,amd64)
 BPF_ARCH := $(if $(filter aarch64,$(ARCH)),arm64,x86_64)
 
@@ -64,10 +65,13 @@ seccomp-check: ## Fail if the chart seccomp profiles are stale
 bpf: ## Build and sanity-check the BPF objects (bpf/Makefile)
 	$(IN_BUILDER) make -C bpf all check
 
+# A foreign ARCH builds natively in the builder image for that platform, under
+# Docker's QEMU emulation (slow, but the same static musl toolchain).
+GUESTD_PLATFORM := $(if $(filter $(ARCH),$(HOST_ARCH)),,VESTA_PLATFORM=linux/$(OCI_ARCH))
+
 .PHONY: guestd
-guestd: ## Build vesta-guestd (static musl, release) into images/guest/out/guestd/<arch>/
-	@[[ "$(ARCH)" == "$$(uname -m | sed -e 's/^arm64$$/aarch64/')" ]] || { echo "guestd: cross builds are not wired up; build on an $(ARCH) host" >&2; exit 1; }
-	$(IN_BUILDER) sh -euc 'cargo build --locked --release --manifest-path guest/Cargo.toml && \
+guestd: ## Build vesta-guestd (static musl, release) into images/guest/out/guestd/<arch>/ (ARCH=aarch64 on x86_64 uses emulation)
+	$(GUESTD_PLATFORM) $(IN_BUILDER) sh -euc 'cargo build --locked --release --manifest-path guest/Cargo.toml && \
 		install -D -m 0755 guest/target/release/vesta-guestd $(GUESTD_BIN)'
 
 .PHONY: agent
@@ -128,6 +132,10 @@ helm-check: ## Lint the chart, fail if deploy/manifests is stale, validate with 
 	hack/helm.sh lint
 	hack/helm.sh check
 	hack/helm.sh kubeconform
+
+.PHONY: crd-check
+crd-check: ## Check the VestaPolicy CRD, status server-side apply and admission policy on a throwaway k3s (privileged Docker)
+	hack/crd-check.sh
 
 ##@ Quality
 

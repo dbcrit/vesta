@@ -102,7 +102,7 @@ impl Default for Config {
             replay_max_events: 16384,
             replay_max_bytes: 8 << 20,
             bind_timeout_ms: 10_000,
-            bind_poll_ms: 20,
+            bind_poll_ms: 100,
             frame_timeout_ms: 10_000,
             write_timeout_ms: 10_000,
             gc_interval_ms: 30_000,

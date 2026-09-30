@@ -36,7 +36,8 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "vesta.serviceAccountName" . }}
-      # Only the installer gets an API token (projected volume below).
+      # Tokens are projected only into the containers that need them: the
+      # installer, and the agent with policies.source kubernetes.
       automountServiceAccountToken: false
       # Host AF_VSOCK is not confirmed to be network-namespace aware, so the
       # agent dials guests from the host network namespace.
@@ -252,8 +253,14 @@ spec:
               subPath: agent.yaml
               readOnly: true
             {{- if .Values.staticPolicies }}
+            # A directory mount (no subPath), so ConfigMap updates reach the agent.
             - name: policies
               mountPath: /etc/vesta/policies
+              readOnly: true
+            {{- end }}
+            {{- if eq .Values.policies.source "kubernetes" }}
+            - name: agent-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
             {{- end }}
             - name: tmp
@@ -323,6 +330,25 @@ spec:
         - name: policies
           configMap:
             name: {{ include "vesta.fullname" . }}-policies
+        {{- end }}
+        {{- if and (eq .Values.policies.source "kubernetes") (not .Values.uninstall.enabled) }}
+        - name: agent-token
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
         {{- end }}
         - name: tmp
           emptyDir:

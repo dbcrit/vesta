@@ -13,7 +13,7 @@ State of the tree against [ARCHITECTURE.md](ARCHITECTURE.md), as of 2026-09-30. 
 |---|---|
 | **0: Decisions + guest foundation** | Mostly built, not run end to end. The kernel fragment merges into Kata 4.2.0's `build-kernel.sh setup` for 6.18.35. The osbuilder recipe, systemd units, `vesta-install` and the RuntimeClass exist. Not done: the ADRs for Q1/Q2/Q5, the upstream Kata issue, a full kernel and rootfs build, and booting the image under QEMU. Boot time and memory deltas are not measured. |
 | **1: MVP, audit, QEMU** | Implemented and unit-tested: P1, P2 and N1, the CTRL and EVT channel with handshake, heartbeats and drop counters, cgroup v2 attribution, static policy from a file, the `AuditOnly`/`Detached` kill switch, JSON-lines export, and Prometheus metrics. Not done: the OTLP exporter, the k3s+Kata e2e suite, and the performance budget check. |
-| **2: Policy API** | Partial. The NRI start gate, generation acks and the `VestaPolicy` v1alpha1 types (static file only) exist. Not done: CRD controllers and informers, `VestaConfig`, status conditions, rootfs-type detection, and policy hot-reload (a policy change needs an agent restart). |
+| **2: Policy API** | Mostly implemented. `VestaPolicy` v1alpha1 CRD (`deploy/helm/vesta/crds/`), watched by every agent with a dynamic informer (`policies.source: kubernetes`); policy hot-reload from the CRD or from the static policy file (re-read every 10 s, no agent restart); stable policy ids across reloads; per-node status (`status.nodes[]`, server-side apply, limited to the agent's own node by a ValidatingAdmissionPolicy); NRI start gate, generation acks, sandbox default. The CRD, status merge and admission policy were checked against a k3s API server (`make crd-check`). Not done: `ClusterVestaPolicy`, `VestaConfig`, aggregated status conditions, rootfs-type detection, staged rollout. |
 | **3: Enforce** | Partial. Exec allow/deny and egress CIDR deny in `ENFORCE` mode and `failurePolicy` work, and enforcement survives a guestd kill (pinned links). Not done: drift prevention, P3, S1, S2, self-protection (T programs), load shedding, and the tamper suite. |
 | **4, 5** | Not started. |
 
@@ -40,7 +40,7 @@ State of the tree against [ARCHITECTURE.md](ARCHITECTURE.md), as of 2026-09-30. 
 
 1. **Exec tracepoint:** P1 attaches to `tp_btf/sched_process_exec` rather than `tp/sched/sched_process_exec`, for typed arguments.
 2. **Ancestor lookup:** the programs use the nearest bound ancestor cgroup, up to 15 levels ([abi.md](abi.md) step 2). A workload cannot leave its policy by creating a child cgroup.
-3. **No sandbox default policy (§2.5).** A never-bound container cgroup is unenforced. `Closed` is enforced by the host start gate instead: a container whose bind is not acked at the requested generation does not start. A bind that is only pending on the guest (its policy generation is not applied) is acked with the applied generation, so the gate treats it as not confirmed. This is documented in §2.5 and abi.md.
+3. **Sandbox default (§2.5).** Implemented as a pending entry on the pod-level cgroup: the host sends `SetSandboxDefault` with the pod's cgroup parent on every connect. When any policy selecting the pod is `Enforce` with `failurePolicy: Closed`, guestd writes a pending `Closed`/`Enforce` `cgroup_policy` entry (policy id 0) on the pod-level cgroup. The BPF ancestor lookup applies it to every container cgroup in the pod that is not bound, so exec and connect there are denied until its bind completes; a bound container's own entry is nearer and wins. Otherwise the host sends `Open`, which removes the entry. The default covers the whole pod: a container whose own policy is `Open` but whose bind does not complete is denied too. guestd warns in the bind ack when a container cgroup is not directly under the pod cgroup (an unexpected guest layout). This has not run in a real Kata guest, so kata-agent 4.2's pod cgroup layout is inferred from its cgroups-path rules.
 4. **Map flags beyond the abi.md table:** `BPF_F_RDONLY_PROG` on the policy maps, and `BPF_F_NO_PREALLOC` on `cgroup_policy` and `exec_rules`. The layouts are unchanged.
 5. **Extra BPF state:** non-ABI `.rodata` (`vesta_abi_version`, `audit_unbound_exec`), an unpinned per-CPU scratch map, and a guestd-owned pinned `state/event_seq` map. The BPF programs never read the seq map.
 6. **P2 events:** P2 emits only on deny or would-deny, and without argv. P1 audits every exec.
@@ -61,21 +61,23 @@ State of the tree against [ARCHITECTURE.md](ARCHITECTURE.md), as of 2026-09-30. 
 21. **metricsAddr:** the agent's `metricsAddr` defaults to `127.0.0.1:9464`. The chart binds it to the node IP only when metrics are exposed.
 22. **Guest-asserted attributes:** export attributes are not all prefixed `vesta.guest.*`. The docs now list the few host-set attributes; everything else is guest-asserted.
 
+23. **Policy status (§2.8):** instead of `status.conditions` and cluster-wide counts, which would need a central controller, every agent writes its node's entry in `status.nodes[]` (`accepted`, `message`, `sandboxes`, `programmed`, `containers`, `observedGeneration`) with server-side apply. An invalid VestaPolicy is left out of the set on every node and reported there; the others still apply. A static policy file stays all-or-nothing.
+24. **Policy ids:** stable across reloads per namespace/name (a new policy never takes an id the previous set used) instead of positional.
+
 ## Open items
 
-- **Guest adoption after a restart:**
-  - After a guestd restart, adopted map state keeps enforcing: orphan cgroups and the rules they reference.
-  - HelloReply still reports `applied_generation = 0` until the host re-applies, and `Status` does not list orphans.
-  - `policy_ready` keeps the old generation meanwhile.
+- **Guest adoption after a restart:** adopted map state keeps enforcing (orphan cgroups and the rules they reference). The adopted `policy_ready` is reported as `HelloReply.adopted_generation` and acts as a generation floor, and `Status.adopted` lists orphans. The agent never sends `GetStatus`, so orphans are not surfaced in metrics or logs yet.
 - **Missing guest features:**
-  - The process ancestry chain (`Event.chain`) is not filled.
-  - BindContainer waits for the cgroup by polling. There is no inotify watch and no `cgroup_mkdir` program.
+  - `Event.chain` is best effort: it comes from guestd's cache of exec events (4096 processes), so processes that have not exec'd since guestd started end the chain with their pid only, and without exit events a cached entry can outlive its process until the pid is exec'd again or evicted.
+  - BindContainer waits for the cgroup with an inotify watch plus a 100 ms fallback re-check. There is no `cgroup_mkdir` BPF program; the inotify path has only run in the Linux test container, not in a Kata guest.
 - **guestd resource use:** the cgroup GC walk is synchronous on guestd's single thread. It now tolerates cgroups vanishing mid-walk, and is bounded to 65536 entries.
 - **Builds not done:**
-  - No arm64 `vesta-guestd` build (no musl cross toolchain in the builder). The arm64 BPF object builds.
+  - arm64 `vesta-guestd`: `make guestd ARCH=aarch64` builds it in the arm64 builder image, natively on arm64 hosts or under Docker's QEMU emulation on x86_64 (slow). CI builds it on a native `ubuntu-24.04-arm` runner. It has not run on arm64 hardware.
   - The full guest kernel build, the osbuilder rootfs image and the `vesta-install` image have not been built here.
 - **Host agent:**
-  - Load shedding (§2.2), the OTLP exporter, CRD controllers, `VestaConfig`, and policy hot-reload are not done.
+  - Load shedding (§2.2), the OTLP exporter, `ClusterVestaPolicy` and `VestaConfig` are not done.
+  - Policy reload: between the new `ApplyPolicy` and the re-binds that follow it, a container keeps its previous policy id. Ids are stable, so that is the same policy with its new rules, or monitor-only if it was deleted. Pod label changes are not tracked: policies are resolved from the labels NRI reported at sandbox creation.
+  - `status.nodes[]` entries of removed nodes are not cleaned up.
   - No outstanding-request metric for CTRL.
   - `cmd/*`, `httpserver` and `metrics` have no dedicated unit tests.
 - **Dependencies and CI:**

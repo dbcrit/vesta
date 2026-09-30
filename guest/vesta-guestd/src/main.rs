@@ -3,8 +3,10 @@
 //! serves the host channel on vsock (ARCHITECTURE §2.2, §2.3).
 
 mod abi;
+mod ancestry;
 mod bpf;
 mod cgroup;
+mod cgwatch;
 mod codec;
 mod config;
 mod ctrl;

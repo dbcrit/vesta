@@ -422,7 +422,7 @@ The exact layouts are in `bpf/include/vesta_abi.h`, documented in [abi.md](abi.m
 - BPF programs tag events with `bpf_get_current_cgroup_id()`. This requires **cgroup v2** in the guest. Kata 4.x guests already boot cgroup v2: the default `kernel_params` are `cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1`, and kata-agent reads `systemd.unified_cgroup_hierarchy`. There is no `agent.` variant. vesta keeps these params and checks `cgroup_v2` in `HelloReply` ([compat](compat/kata-4.2.md) §4, resolves Q6).
 - Mapping: the host sends `BindContainer{container_id, cgroup_path}` at NRI `CreateContainer`, with `cgroup_path` = the OCI `linux.cgroupsPath` verbatim, which Kata passes to the agent unchanged. vesta-guestd derives the guest cgroup directory with kata-agent's rules and confirms it when the cgroup appears. The rules: systemd `slice:prefix:name` becomes `<expanded slices>/<prefix>-<name>.scope`; the cgroupfs form replaces `:` with `/` ([compat](compat/kata-4.2.md) §4). The inode number of the cgroup directory is the cgroup id. guestd then writes `cgroup_policy`.
 - Unbound cgroups under the containers subtree fall back to the sandbox default policy. With `failurePolicy: Closed`, exec and connect are denied until the cgroup is bound (§2.9).
-  - **Implementation status (deviation):** the MVP has no sandbox default entry. The BPF programs look up the nearest bound ancestor cgroup ([abi.md](abi.md) decision step 2), and a cgroup with no bound ancestor is unenforced. `Closed` is enforced by the host start gate instead: a container whose bind is not acked at the requested generation does not start, so no workload process runs in an unbound container cgroup. The residual gap is a container started while the vesta NRI plugin was not registered (see §2.9, NRI required plugins).
+  - **Implementation status:** implemented as `SetSandboxDefault` (control.proto): the host sends `SetSandboxDefault` with the pod's cgroup parent on every connect. When any policy selecting the pod is `Enforce` with `failurePolicy: Closed`, guestd writes a pending `Closed`/`Enforce` `cgroup_policy` entry (policy id 0) on the pod-level cgroup. The BPF ancestor lookup applies it to every container cgroup in the pod that is not bound, so exec and connect there are denied until its bind completes; a bound container's own entry is nearer and wins. Otherwise the host sends `Open`, which removes the entry. The default covers the whole pod: a container whose own policy is `Open` but whose bind does not complete is denied too. See [abi.md](abi.md) decision step 2.
 - If cgroup v2 is unavailable, the fallback is mount-namespace or pid-namespace inode (`task->nsproxy` via CO-RE, `bpf_get_ns_current_pid_tgid`). This fallback supports attribution only, not per-container attachment.
 - Host enrichment adds sandbox ID, pod name, namespace and UID, container name, image and image digest, and node from CRI/NRI.
 - Multi-container pods: each container can bind a different policy through `containerSelector`. Sidecars and pause get the default policy.
@@ -511,6 +511,8 @@ status:
 ```
 
 Paths are resolved to `(dev, ino)` **in the guest** at bind time, because the host cannot see guest inodes. VestaConfig holds `globalMode`, defaults, export sinks, and heartbeat and budget settings.
+
+**Implementation status:** `VestaPolicy` is implemented as a CRD watched by every agent (no central controller) and hot-reloaded into running guests. The status differs from the sketch above: each agent writes its node's entry in `status.nodes[]` with server-side apply (`accepted`, `message`, `sandboxes`, `programmed`, `containers`, `observedGeneration`) instead of cluster-wide `conditions` and counts. `ClusterVestaPolicy`, `VestaConfig` and `rollout` are not implemented. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
 
 ### 2.9 Startup ordering and failure semantics [vesta]
 
@@ -686,7 +688,7 @@ hack/                dev scripts (Docker-based proto gen, ABI check)
 deploy/              Helm chart, kustomize, RuntimeClass kata-qemu-vesta
 test/abi, test/bpf, test/e2e   test suites
 docs/                architecture, threat model, ADRs
-go.mod               single Go module github.com/vesta-dev/vesta (placeholder path)
+go.mod               single Go module github.com/dbcrit/vesta (placeholder path)
 LICENSE (Apache-2.0), LICENSES/ (Apache-2.0, GPL-2.0-only, BSD-2-Clause)
 ```
 

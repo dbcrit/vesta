@@ -3,6 +3,7 @@
 package policy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	channelv1 "github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1"
+	v1alpha1 "github.com/dbcrit/vesta/api/v1alpha1"
 )
 
 const good = `
@@ -198,5 +202,131 @@ func TestLoadFileGenerationAndSize(t *testing.T) {
 	}
 	if _, err := LoadFile(p, 0, now); err == nil {
 		t.Fatal("oversized file accepted")
+	}
+}
+
+func mkPolicy(ns, name string, mode v1alpha1.Mode, failure v1alpha1.FailurePolicy, labels map[string]string) v1alpha1.VestaPolicy {
+	return v1alpha1.VestaPolicy{
+		TypeMeta:   metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion, Kind: v1alpha1.KindVestaPolicy},
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Spec: v1alpha1.VestaPolicySpec{
+			Selector: &metav1.LabelSelector{MatchLabels: labels},
+			Mode:     mode, FailurePolicy: failure,
+		},
+	}
+}
+
+func ids(s *Set) map[string]uint32 {
+	out := map[string]uint32{}
+	for _, p := range s.Policies {
+		out[p.Key()] = p.ID
+		if p.Bundle.GetPolicyId() != p.ID {
+			panic("bundle id differs from policy id")
+		}
+		if q, ok := s.ByID(p.ID); !ok || q != p {
+			panic("ByID does not find " + p.Key())
+		}
+	}
+	return out
+}
+
+func TestCompileWithKeepsIDsStable(t *testing.T) {
+	a := mkPolicy("ns", "a", "", "", nil)
+	c := mkPolicy("ns", "c", "", "", nil)
+	s1, rej, err := CompileWith([]v1alpha1.VestaPolicy{a, c}, 1, nil)
+	if err != nil || len(rej) != 0 {
+		t.Fatal(err, rej)
+	}
+	if got := ids(s1); got["ns/a"] != 1 || got["ns/c"] != 2 {
+		t.Fatalf("initial ids %v", got)
+	}
+	// Inserting "b" (sorts between a and c) must not renumber c; removing a
+	// must not hand a's id to the new policy in the same reload.
+	b := mkPolicy("ns", "b", "", "", nil)
+	s2, _, err := CompileWith([]v1alpha1.VestaPolicy{b, c}, 2, s1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(s2); got["ns/c"] != 2 || got["ns/b"] != 3 {
+		t.Fatalf("after reload %v", got)
+	}
+	if _, ok := s2.ByID(1); ok {
+		t.Fatal("removed policy's id still resolves")
+	}
+	// A later reload may reuse id 1: it was not in the previous set.
+	d := mkPolicy("ns", "d", "", "", nil)
+	s3, _, err := CompileWith([]v1alpha1.VestaPolicy{b, c, d}, 3, s2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(s3); got["ns/d"] != 1 || got["ns/b"] != 3 || got["ns/c"] != 2 {
+		t.Fatalf("third set %v", got)
+	}
+	if s3.Policies[0].Name != "b" || s3.Policies[2].Name != "d" {
+		t.Fatal("policies not sorted by namespace/name")
+	}
+}
+
+func TestCompileWithRejectsOnlyInvalidPolicies(t *testing.T) {
+	good := mkPolicy("ns", "good", "", "", nil)
+	bad := mkPolicy("ns", "bad", "Sometimes", "", nil)
+	noSel := mkPolicy("ns", "nosel", "", "", nil)
+	noSel.Spec.Selector = nil
+	set, rej, err := CompileWith([]v1alpha1.VestaPolicy{good, bad, noSel, good}, 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Policies) != 1 || set.Policies[0].Name != "good" {
+		t.Fatalf("policies %v", set.Policies)
+	}
+	for _, k := range []string{"ns/bad", "ns/nosel", "ns/good"} {
+		if rej[k] == nil {
+			t.Errorf("%s not rejected: %v", k, rej)
+		}
+	}
+	if _, err := Compile([]v1alpha1.VestaPolicy{good, bad}, 5); err == nil {
+		t.Fatal("Compile must fail on any invalid policy")
+	}
+}
+
+func TestCompileWithIDExhaustionRenumbers(t *testing.T) {
+	prev := &Set{Generation: 1, byID: map[uint32]*Policy{}}
+	for id := uint32(1); id <= MaxPolicyID; id++ {
+		p := &Policy{ID: id, Namespace: "old", Name: fmt.Sprintf("p%d", id)}
+		prev.Policies = append(prev.Policies, p)
+		prev.byID[id] = p
+	}
+	set, _, err := CompileWith([]v1alpha1.VestaPolicy{mkPolicy("ns", "new", "", "", nil)}, 2, prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Policies[0].ID != 1 {
+		t.Fatalf("id %d", set.Policies[0].ID)
+	}
+}
+
+func TestSandboxDefault(t *testing.T) {
+	set, err := Compile([]v1alpha1.VestaPolicy{
+		mkPolicy("ns", "audit-closed", v1alpha1.ModeAudit, v1alpha1.FailureClosed, map[string]string{"app": "a"}),
+		mkPolicy("ns", "enforce-open", v1alpha1.ModeEnforce, v1alpha1.FailureOpen, map[string]string{"app": "b"}),
+		mkPolicy("ns", "enforce-closed", v1alpha1.ModeEnforce, v1alpha1.FailureClosed, map[string]string{"app": "c"}),
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		ns, app string
+		closed  bool
+	}{
+		{"ns", "a", false}, {"ns", "b", false}, {"ns", "c", true}, {"other", "c", false}, {"ns", "none", false},
+	} {
+		m, f := set.SandboxDefault(tc.ns, map[string]string{"app": tc.app})
+		if closed := f == v1alpha1.FailureClosed && m == v1alpha1.ModeEnforce; closed != tc.closed {
+			t.Errorf("%s/%s: %s %s", tc.ns, tc.app, m, f)
+		}
+	}
+	var nilSet *Set
+	if _, f := nilSet.SandboxDefault("ns", nil); f != v1alpha1.FailureOpen {
+		t.Fatal("nil set")
 	}
 }

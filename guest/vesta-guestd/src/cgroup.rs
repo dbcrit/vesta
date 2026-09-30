@@ -141,6 +141,23 @@ fn relative_components(cpath: &str) -> Result<PathBuf, PathError> {
     Ok(out)
 }
 
+/// Maps a pod's cgroup parent (NRI `PodSandbox.linux.cgroup_parent`) to a
+/// path relative to the cgroup2 root, by the same rules as container paths:
+/// a systemd slice is expanded (its containers are `<slice>/<prefix>-<id>.scope`),
+/// anything else is a cgroupfs path (its containers are `<parent>/<id>`).
+pub fn pod_cgroup_path(cgroup_parent: &str) -> Result<PathBuf, PathError> {
+    if cgroup_parent.len() > MAX_CGROUP_PATH {
+        return Err(PathError::TooLong);
+    }
+    if cgroup_parent.ends_with(SLICE_SUFFIX) && !cgroup_parent.contains('/') {
+        if !is_systemd_word(cgroup_parent) {
+            return Err(PathError::Invalid("invalid slice name"));
+        }
+        return relative_components(&expand_slice(cgroup_parent)?);
+    }
+    relative_components(cgroup_parent)
+}
+
 /// Parses a configured protected cgroup path (relative to the cgroup root).
 pub fn protected_path(p: &str) -> Result<PathBuf, PathError> {
     if p.len() > MAX_CGROUP_PATH {
@@ -286,6 +303,25 @@ mod tests {
         );
         assert!(guest_cgroup_path("bad:p:n", CID).is_err());
         assert!(guest_cgroup_path("a--b.slice:p:n", CID).is_err());
+    }
+
+    #[test]
+    fn pod_paths_are_parents_of_container_paths() {
+        let pod = pod_cgroup_path("kubepods-burstable-pod1234.slice").unwrap();
+        let ctr =
+            guest_cgroup_path("kubepods-burstable-pod1234.slice:cri-containerd:abc", CID).unwrap();
+        assert_eq!(ctr.parent(), Some(pod.as_path()));
+
+        let pod = pod_cgroup_path("/kubepods/burstable/pod1").unwrap();
+        let ctr = guest_cgroup_path("/kubepods/burstable/pod1/abc", CID).unwrap();
+        assert_eq!(ctr.parent(), Some(pod.as_path()));
+
+        assert!(pod_cgroup_path("").is_err(), "cgroup root");
+        assert!(pod_cgroup_path("-.slice").is_err(), "root slice");
+        assert!(pod_cgroup_path("/a/../b").is_err());
+        assert!(pod_cgroup_path("a--b.slice").is_err());
+        assert!(pod_cgroup_path("bad name.slice").is_err());
+        assert!(pod_cgroup_path(&"a/".repeat(3000)).is_err());
     }
 
     #[test]

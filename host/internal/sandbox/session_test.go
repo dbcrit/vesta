@@ -5,6 +5,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -38,6 +39,7 @@ type fakeGuest struct {
 	applies  []*channelv1.ApplyPolicy
 	binds    []*channelv1.BindContainer
 	setModes []channelv1.GlobalMode
+	defaults []*channelv1.SetSandboxDefault
 	subs     []*channelv1.Subscribe
 	ctrlDial int
 	evt      chan *wire.Conn
@@ -105,6 +107,11 @@ func (g *fakeGuest) serveCtrl(c *wire.Conn) {
 			if g.ackBind != nil {
 				resp = g.ackBind(b.BindContainer, id)
 			}
+		case *channelv1.ControlRequest_SetSandboxDefault:
+			g.mu.Lock()
+			g.defaults = append(g.defaults, b.SetSandboxDefault)
+			g.mu.Unlock()
+			resp = &channelv1.ControlResponse{RequestId: id, Body: &channelv1.ControlResponse_Ack{Ack: &channelv1.Ack{Ok: true}}}
 		case *channelv1.ControlRequest_SetMode:
 			g.mu.Lock()
 			g.setModes = append(g.setModes, b.SetMode.GetMode())
@@ -332,6 +339,71 @@ func TestSessionEnforceNeedsGuestSupport(t *testing.T) {
 	}
 }
 
+func TestSessionSandboxDefault(t *testing.T) {
+	const doc = "apiVersion: vesta.dev/v1alpha1\nkind: VestaPolicy\nmetadata: {name: p, namespace: ns}\nspec: {selector: {matchLabels: {app: web}}, mode: Enforce, failurePolicy: %s}"
+	for _, tc := range []struct {
+		name    string
+		failure string
+		labels  map[string]string
+		parent  string
+		want    channelv1.FailurePolicy // UNSPECIFIED = nothing sent
+		mode    channelv1.Mode
+	}{
+		{"closed enforce policy selects the pod", "Closed", map[string]string{"app": "web"}, "kubepods-pod1.slice",
+			channelv1.FailurePolicy_FAILURE_POLICY_CLOSED, channelv1.Mode_MODE_ENFORCE},
+		{"open policy", "Open", map[string]string{"app": "web"}, "kubepods-pod1.slice",
+			channelv1.FailurePolicy_FAILURE_POLICY_OPEN, channelv1.Mode_MODE_AUDIT},
+		{"closed policy does not select the pod", "Closed", map[string]string{"app": "db"}, "kubepods-pod1.slice",
+			channelv1.FailurePolicy_FAILURE_POLICY_OPEN, channelv1.Mode_MODE_AUDIT},
+		{"no cgroup parent from the runtime", "Closed", map[string]string{"app": "web"}, "",
+			channelv1.FailurePolicy_FAILURE_POLICY_UNSPECIFIED, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pols, err := policy.Parse([]byte(fmt.Sprintf(doc, tc.failure)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			set, err := policy.Compile(pols, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := newFakeGuest(t)
+			base := g.hello
+			g.hello = func() *channelv1.HelloReply { r := base(); r.Features = append(r.Features, "enforce"); return r }
+			g.ackBind = func(b *channelv1.BindContainer, id uint64) *channelv1.ControlResponse {
+				return &channelv1.ControlResponse{RequestId: id, Body: &channelv1.ControlResponse_Ack{Ack: &channelv1.Ack{Ok: true, Generation: b.GetGeneration()}}}
+			}
+			h := newHarness(t, g, set, channelv1.GlobalMode_GLOBAL_MODE_NORMAL)
+			in := info()
+			in.PodLabels, in.CgroupParent = tc.labels, tc.parent
+			s, _ := h.reg.Ensure(in)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := s.Bind(ctx, container("c1", nil)); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.WaitBound(ctx, "c1"); err != nil {
+				t.Fatal(err)
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if tc.want == channelv1.FailurePolicy_FAILURE_POLICY_UNSPECIFIED {
+				if len(g.defaults) != 0 {
+					t.Fatalf("sent %v without a cgroup parent", g.defaults)
+				}
+				return
+			}
+			if len(g.defaults) != 1 {
+				t.Fatalf("sandbox defaults sent: %d", len(g.defaults))
+			}
+			d := g.defaults[0]
+			if d.GetFailure() != tc.want || d.GetMode() != tc.mode || d.GetCgroupParent() != tc.parent {
+				t.Fatalf("got %v", d)
+			}
+		})
+	}
+}
+
 func TestSessionGenerationFollowsGuest(t *testing.T) {
 	g := newFakeGuest(t)
 	base := g.hello
@@ -350,6 +422,47 @@ func TestSessionGenerationFollowsGuest(t *testing.T) {
 	}
 	if len(g.setModes) != 1 || g.setModes[0] != channelv1.GlobalMode_GLOBAL_MODE_AUDIT_ONLY {
 		t.Fatalf("SetMode %v", g.setModes)
+	}
+}
+
+func TestSessionGenerationAboveAdopted(t *testing.T) {
+	g := newFakeGuest(t)
+	base := g.hello
+	g.hello = func() *channelv1.HelloReply { r := base(); r.AdoptedGeneration = 700; return r }
+	h := newHarness(t, g, nil, channelv1.GlobalMode_GLOBAL_MODE_NORMAL)
+	s, _ := h.reg.Ensure(info())
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.Bind(ctx, container("c1", nil)); err != nil {
+		t.Fatal(err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if got := g.applies[0].GetGeneration(); got != 701 {
+		t.Fatalf("generation %d, want 701", got)
+	}
+}
+
+func TestNextGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		want, applied, adopted uint64
+		out                    uint64
+	}{
+		{"fresh guest", 10, 0, 0, 10},
+		{"reconnect, same set", 10, 10, 0, 10},
+		{"guest ahead", 10, 12, 0, 13},
+		{"agent ahead", 10, 5, 0, 10},
+		{"restarted guestd, same set", 10, 0, 10, 10},
+		{"restarted guestd, older agent clock", 10, 0, 40, 41},
+		{"restarted guestd, newer agent", 50, 0, 40, 50},
+		{"applied wins over adopted", 10, 12, 40, 13},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextGeneration(tc.want, tc.applied, tc.adopted); got != tc.out {
+				t.Fatalf("nextGeneration(%d, %d, %d) = %d, want %d", tc.want, tc.applied, tc.adopted, got, tc.out)
+			}
+		})
 	}
 }
 
@@ -581,5 +694,76 @@ func TestSessionAlertLogIsRateLimited(t *testing.T) {
 	s.mu.Unlock()
 	if st == nil || st.suppressed != 99 {
 		t.Fatalf("log state %+v, want 99 suppressed", st)
+	}
+}
+
+func TestSessionPolicyReload(t *testing.T) {
+	parse := func(doc string) []v1alpha1.VestaPolicy {
+		pols, err := policy.Parse([]byte(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pols
+	}
+	const podWide = "apiVersion: vesta.dev/v1alpha1\nkind: VestaPolicy\nmetadata: {name: pod-wide, namespace: ns}\nspec: {selector: {}}\n"
+	const appOnly = "---\napiVersion: vesta.dev/v1alpha1\nkind: VestaPolicy\nmetadata: {name: a-app-only, namespace: ns}\nspec: {selector: {}, containerSelector: {names: [app]}}\n"
+	set1, err := policy.Compile(parse(podWide), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newFakeGuest(t)
+	g.ackBind = func(b *channelv1.BindContainer, id uint64) *channelv1.ControlResponse {
+		return &channelv1.ControlResponse{RequestId: id, Body: &channelv1.ControlResponse_Ack{Ack: &channelv1.Ack{Ok: true, Generation: b.GetGeneration()}}}
+	}
+	h := newHarness(t, g, set1, channelv1.GlobalMode_GLOBAL_MODE_NORMAL)
+	in := info()
+	in.CgroupParent = "kubepods-pod1.slice"
+	s, _ := h.reg.Ensure(in)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := s.Bind(ctx, container("c1", set1.Policies[0])); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WaitBound(ctx, "c1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// "a-app-only" sorts before "pod-wide" but must not take its id, and it
+	// is more specific for container "app", so c1 moves to it.
+	set2, rej, err := policy.CompileWith(parse(podWide+appOnly), 200, set1)
+	if err != nil || len(rej) != 0 {
+		t.Fatal(err, rej)
+	}
+	h.reg.SetPolicies(set2)
+	if h.reg.Policies() != set2 {
+		t.Fatal("registry did not swap the set")
+	}
+	appID := set2.Policies[0].ID
+	if set2.Policies[0].Name != "a-app-only" || appID == set1.Policies[0].ID {
+		t.Fatalf("ids: %v", set2.Policies)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		g.mu.Lock()
+		applies, binds, defaults := len(g.applies), append([]*channelv1.BindContainer(nil), g.binds...), len(g.defaults)
+		var lastGen uint64
+		if applies > 0 {
+			lastGen = g.applies[applies-1].GetGeneration()
+		}
+		g.mu.Unlock()
+		last := binds[len(binds)-1]
+		if applies == 2 && lastGen == 200 && last.GetPolicyId() == appID && last.GetGeneration() == 200 && defaults == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after reload: applies=%d gen=%d last bind=%v defaults=%d", applies, lastGen, last, defaults)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pi, ok := s.Policy(200, appID); !ok || pi.Name != "a-app-only" {
+		t.Fatalf("event enrichment lookup %v %v", pi, ok)
+	}
+	if _, ok := s.Policy(100, appID); ok {
+		t.Fatal("stale generation must not resolve")
 	}
 }

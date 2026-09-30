@@ -253,6 +253,7 @@ mod tests {
                 drops: vec![],
             }),
             cgroups: Box::new(FakeCgroups::default()),
+            cgroup_waits: crate::cgwatch::CgroupWaits::default(),
             hub: crate::events::EventHub::new(4, 1 << 20),
             events_ready: Rc::new(tokio::sync::Notify::new()),
             heartbeat_seq: 0,

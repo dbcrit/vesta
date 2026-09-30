@@ -54,6 +54,25 @@ jobs:
       - run: make abi-check
       - run: make bpf
 
+  guestd:
+    name: guestd (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Native build on each runner arch; the binary must be static.
+      - run: make guestd
+      - run: file images/guest/out/guestd/${{ matrix.arch }}/vesta-guestd | tee /dev/stderr | grep -q 'static'
+
   generated:
     name: generated code is current (proto, seccomp, manifests)
     runs-on: ubuntu-24.04
@@ -78,6 +97,8 @@ jobs:
         with:
           persist-credentials: false
       - run: make helm-check
+      # Needs --privileged Docker (k3s in a container).
+      - run: make crd-check
 
   scripts:
     name: shellcheck, hadolint, actionlint

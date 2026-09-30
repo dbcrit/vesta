@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
 	"os"
 	"path"
@@ -32,12 +33,14 @@ import (
 
 // Limits from api/proto/vesta/channel/v1/control.proto.
 const (
-	MaxFileSize   = 4 << 20
-	MaxPolicies   = 256 // ApplyPolicy.bundles max
-	MaxNameLen    = 253 // PolicyBundle.name
-	MaxExecRules  = 4096
-	MaxNetRules   = 1024
-	MaxPorts      = 64
+	MaxFileSize  = 4 << 20
+	MaxPolicies  = 256 // ApplyPolicy.bundles max
+	MaxNameLen   = 253 // PolicyBundle.name
+	MaxExecRules = 4096
+	MaxNetRules  = 1024
+	MaxPorts     = 64
+	// MaxPolicyID is the guest's highest policy id (vesta_abi.h VESTA_MAX_POLICIES).
+	MaxPolicyID   = 1024
 	MaxPathLen    = 4096
 	SchemaVersion = 1
 	listKind      = "VestaPolicyList"
@@ -60,8 +63,12 @@ type Policy struct {
 type Set struct {
 	// Generation is the ApplyPolicy generation this set is sent as.
 	Generation uint64
-	Policies   []*Policy // sorted by namespace/name; Policies[i].ID == i+1
+	Policies   []*Policy // sorted by namespace/name
+	byID       map[uint32]*Policy
 }
+
+// Key is a policy's namespace/name.
+func (p *Policy) Key() string { return p.Namespace + "/" + p.Name }
 
 // Bundles returns the PolicyBundle list for ApplyPolicy.
 func (s *Set) Bundles() []*channelv1.PolicyBundle {
@@ -77,10 +84,11 @@ func (s *Set) Bundles() []*channelv1.PolicyBundle {
 
 // ByID returns the policy with id, if any.
 func (s *Set) ByID(id uint32) (*Policy, bool) {
-	if s == nil || id == 0 || int(id) > len(s.Policies) {
+	if s == nil {
 		return nil, false
 	}
-	return s.Policies[id-1], true
+	p, ok := s.byID[id]
+	return p, ok
 }
 
 // Match is the policy selected for one container.
@@ -119,11 +127,43 @@ func (s *Set) Resolve(namespace string, podLabels map[string]string, container s
 	return m
 }
 
+// SandboxDefault is the in-guest default for a pod's container cgroups that
+// are not bound (control.proto SetSandboxDefault, ARCHITECTURE §2.5). It is
+// Enforce+Closed when any policy selecting the pod, for any container, is
+// Enforce with failurePolicy Closed; then exec and connect in an unbound
+// container cgroup of the pod are denied until its bind completes. Otherwise
+// it is Open (no default entry): an Audit policy never denies anyway.
+func (s *Set) SandboxDefault(namespace string, podLabels map[string]string) (v1alpha1.Mode, v1alpha1.FailurePolicy) {
+	if s != nil {
+		ls := labels.Set(podLabels)
+		for _, p := range s.Policies {
+			if p.Namespace == namespace && p.selector.Matches(ls) &&
+				p.Mode == v1alpha1.ModeEnforce && p.Failure == v1alpha1.FailureClosed {
+				return v1alpha1.ModeEnforce, v1alpha1.FailureClosed
+			}
+		}
+	}
+	return v1alpha1.ModeAudit, v1alpha1.FailureOpen
+}
+
 // LoadFile reads, validates and compiles a policy file. prevGeneration is
 // the generation of the previously loaded set (0 if none); the new set's
 // generation is strictly greater and, across restarts, normally greater than
 // anything sent before because it is derived from the wall clock.
 func LoadFile(p string, prevGeneration uint64, now time.Time) (*Set, error) {
+	data, err := ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	pols, err := Parse(data)
+	if err != nil {
+		return nil, fmt.Errorf("policy file %s: %w", p, err)
+	}
+	return Compile(pols, NextGeneration(prevGeneration, now))
+}
+
+// ReadFile reads a policy file of at most MaxFileSize bytes.
+func ReadFile(p string) ([]byte, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, fmt.Errorf("open policy file: %w", err)
@@ -136,12 +176,14 @@ func LoadFile(p string, prevGeneration uint64, now time.Time) (*Set, error) {
 	if len(data) > MaxFileSize {
 		return nil, fmt.Errorf("policy file %s exceeds %d bytes", p, MaxFileSize)
 	}
-	pols, err := Parse(data)
-	if err != nil {
-		return nil, fmt.Errorf("policy file %s: %w", p, err)
-	}
-	gen := max(prevGeneration+1, uint64(max(now.UnixMilli(), 1)))
-	return Compile(pols, gen)
+	return data, nil
+}
+
+// NextGeneration is the generation for a set compiled after one with prev:
+// strictly greater, and derived from the wall clock so that it is normally
+// greater than anything sent before an agent restart.
+func NextGeneration(prev uint64, now time.Time) uint64 {
+	return max(prev+1, uint64(max(now.UnixMilli(), 1)))
 }
 
 // Parse strictly decodes one or more YAML documents, each a VestaPolicy or a
@@ -192,13 +234,42 @@ func Parse(data []byte) ([]v1alpha1.VestaPolicy, error) {
 	return out, nil
 }
 
-// Compile validates pols and turns them into a Set with the given generation.
+// Compile validates pols and turns them into a Set with the given
+// generation. Any invalid policy fails the whole set (static file semantics).
 func Compile(pols []v1alpha1.VestaPolicy, generation uint64) (*Set, error) {
+	set, rejected, err := CompileWith(pols, generation, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := RejectedError(rejected); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
+// RejectedError joins CompileWith's rejections, sorted by key; nil if none.
+func RejectedError(rejected map[string]error) error {
+	errs := make([]error, 0, len(rejected))
+	for _, k := range slices.Sorted(maps.Keys(rejected)) {
+		errs = append(errs, fmt.Errorf("%s: %w", k, rejected[k]))
+	}
+	return errors.Join(errs...)
+}
+
+// CompileWith compiles every valid policy in pols and reports the invalid
+// ones in rejected (keyed by namespace/name) instead of failing the set, so
+// one bad VestaPolicy object does not take the others down.
+//
+// Policy ids are stable across reloads: a policy that exists in prev keeps
+// its id, and a new policy gets the lowest id used by neither prev nor this
+// set. A guest applying the new set therefore never sees an existing binding's
+// policy id point at a different policy, even before the host re-binds.
+func CompileWith(pols []v1alpha1.VestaPolicy, generation uint64, prev *Set) (*Set, map[string]error, error) {
 	if generation == 0 {
-		return nil, errors.New("generation must be > 0")
+		return nil, nil, errors.New("generation must be > 0")
 	}
 	if len(pols) > MaxPolicies {
-		return nil, fmt.Errorf("%d policies, at most %d are supported", len(pols), MaxPolicies)
+		return nil, nil, fmt.Errorf("%d policies, at most %d are supported", len(pols), MaxPolicies)
 	}
 	sorted := slices.Clone(pols)
 	sort.SliceStable(sorted, func(i, j int) bool {
@@ -207,28 +278,63 @@ func Compile(pols []v1alpha1.VestaPolicy, generation uint64) (*Set, error) {
 		}
 		return sorted[i].Name < sorted[j].Name
 	})
-	set := &Set{Generation: generation}
-	var errs []error
-	var nextID uint32
+	prevIDs := map[string]uint32{}
+	taken := map[uint32]bool{}
+	if prev != nil {
+		for _, p := range prev.Policies {
+			prevIDs[p.Key()] = p.ID
+			taken[p.ID] = true
+		}
+	}
+	set := &Set{Generation: generation, byID: map[uint32]*Policy{}}
+	rejected := map[string]error{}
+	var fresh []*v1alpha1.VestaPolicy
 	for i := range sorted {
 		vp := &sorted[i]
 		key := vp.Namespace + "/" + vp.Name
 		if i > 0 && sorted[i-1].Namespace == vp.Namespace && sorted[i-1].Name == vp.Name {
-			errs = append(errs, fmt.Errorf("%s: duplicate policy", key))
+			rejected[key] = errors.New("duplicate policy")
 			continue
 		}
-		nextID++
-		p, err := compileOne(vp, nextID)
+		if id, ok := prevIDs[key]; ok {
+			p, err := compileOne(vp, id)
+			if err != nil {
+				rejected[key] = err
+				continue
+			}
+			set.Policies = append(set.Policies, p)
+			set.byID[id] = p
+			continue
+		}
+		fresh = append(fresh, vp)
+	}
+	next := uint32(1)
+	for _, vp := range fresh {
+		key := vp.Namespace + "/" + vp.Name
+		p, err := compileOne(vp, 0)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
+			rejected[key] = err
 			continue
 		}
+		for next <= MaxPolicyID && (taken[next] || set.byID[next] != nil) {
+			next++
+		}
+		if next > MaxPolicyID {
+			// Ids exhausted by churn: fall back to numbering from scratch.
+			return CompileWith(pols, generation, nil)
+		}
+		p.ID, p.Bundle.PolicyId = next, next
 		set.Policies = append(set.Policies, p)
+		set.byID[next] = p
 	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, err
-	}
-	return set, nil
+	sort.SliceStable(set.Policies, func(i, j int) bool {
+		a, b := set.Policies[i], set.Policies[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Name < b.Name
+	})
+	return set, rejected, nil
 }
 
 func compileOne(vp *v1alpha1.VestaPolicy, id uint32) (*Policy, error) {

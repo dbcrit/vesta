@@ -490,7 +490,7 @@ const file_vesta_channel_v1_events_proto_rawDesc = "" +
 	" \x01(\x0e2\x1c.vesta.channel.v1.GlobalModeR\n" +
 	"globalMode\x12\x1f\n" +
 	"\vinterval_ms\x18\v \x01(\rR\n" +
-	"intervalMsBBZ@github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1b\x06proto3"
+	"intervalMsB?Z=github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1b\x06proto3"
 
 var (
 	file_vesta_channel_v1_events_proto_rawDescOnce sync.Once

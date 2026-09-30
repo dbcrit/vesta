@@ -8,6 +8,7 @@ Installs vesta on Kata nodes:
 - **RuntimeClass `kata-qemu-vesta`:** schedules only onto nodes with that label. Pods opt in with `runtimeClassName: kata-qemu-vesta`.
 - **Access control:** a ServiceAccount, a ClusterRole that allows only `get`/`patch` on nodes, and a ValidatingAdmissionPolicy that narrows that patch to one label on the pod's own node.
 - **ConfigMaps:** the agent config (`agent.config`), optional static policies (`staticPolicies`), and the seccomp profiles.
+- **CRD:** `vestapolicies.vesta.dev` (from `crds/`, installed on first install). With `policies.source=kubernetes` the agent gets a projected token, `get`/`list`/`watch` on `vestapolicies` and `patch` on `vestapolicies/status`; a ValidatingAdmissionPolicy restricts those status writes to the agent's own node entry (checked against k3s by `make crd-check`).
 
 Requirements:
 
@@ -72,7 +73,9 @@ See [values.yaml](values.yaml); [values.schema.json](values.schema.json) validat
 | `installer.restartContainerd` | `true` | `false`: install fails with "restart required" and the node stays unlabelled |
 | `agent.config` | see file | Written to the agent's strict config file |
 | `agent.seccomp` | Localhost + install | See above |
-| `staticPolicies` | `[]` | `vesta.dev/v1alpha1` `VestaPolicy` objects |
+| `policies.source` | `static` | `static`: `staticPolicies`, re-read every `policies.reloadInterval`. `kubernetes`: `VestaPolicy` objects via the API server |
+| `staticPolicies` | `[]` | `vesta.dev/v1alpha1` `VestaPolicy` objects (source `static`) |
+| `rbac.policyStatusPolicy.enabled` | `true` | Source `kubernetes`: admission policy keeping each agent to its own `status.nodes` entry |
 | `runtimeClass.overhead` | 352Mi / 250m | |
 | `priorityClassName` | `""` | `system-node-critical` is recommended where allowed |
 | `metrics.exposeOnNodeIP` | `false` | `/metrics`, `/healthz`, `/readyz` listen on `127.0.0.1` unless this, the Service or the PodMonitor is enabled; then on the node IP (`status.hostIP`) only. They are unauthenticated: firewall the port |

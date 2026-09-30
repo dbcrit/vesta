@@ -38,6 +38,10 @@ type Metrics struct {
 	ChannelConnects     *prometheus.CounterVec // result
 	NRIConnected        prometheus.Gauge       //
 	ChannelThrottled    *prometheus.CounterVec // kind
+	PolicyReloads       *prometheus.CounterVec // source, result
+	PoliciesLoaded      prometheus.Gauge       //
+	PoliciesRejected    prometheus.Gauge       //
+	PolicySetGeneration prometheus.Gauge       //
 }
 
 // Sandbox gauge labels. sandbox_id keeps series of a recreated pod (same
@@ -99,12 +103,25 @@ func New() *Metrics {
 		ChannelThrottled: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "vesta_channel_throttled_total", Help: "Guest EVT frames delayed or dropped by the per-sandbox rate limits, by kind.",
 		}, []string{"kind"}),
+		PolicyReloads: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "vesta_policy_reloads_total", Help: "Policy set reloads, by source and result (applied, rejected, error).",
+		}, []string{"source", "result"}),
+		PoliciesLoaded: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "vesta_policies", Help: "Policies in the current policy set.",
+		}),
+		PoliciesRejected: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "vesta_policies_rejected", Help: "VestaPolicy objects left out of the current set because they are invalid.",
+		}),
+		PolicySetGeneration: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "vesta_policy_set_generation", Help: "Generation of the current policy set.",
+		}),
 	}
 	r.MustRegister(
 		m.EventsTotal, m.EventsDropped, m.RingbufDrops, m.ChannelDrops, m.EventSeqGaps,
 		m.HeartbeatAge, m.PolicyGenerationLag, m.ProgramLoadFailures, m.ChannelRTT,
 		m.Sandboxes, m.TamperAlerts, m.ProtocolErrors, m.GateDecisions, m.ChannelConnects,
 		m.NRIConnected, m.ChannelThrottled,
+		m.PolicyReloads, m.PoliciesLoaded, m.PoliciesRejected, m.PolicySetGeneration,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

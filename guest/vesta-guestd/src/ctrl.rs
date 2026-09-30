@@ -110,6 +110,7 @@ pub fn hello_reply(d: &Shared) -> pb::HelloReply {
         progs: d.bpf.prog_status(true),
         global_mode: policy::global_mode_to_proto(d.engine.global_mode()) as i32,
         applied_generation: d.engine.applied_generation(),
+        adopted_generation: d.engine.adopted_generation(),
     }
 }
 
@@ -122,7 +123,53 @@ pub fn status(d: &Shared) -> pb::Status {
         drops: d.bpf.drop_counts(),
         global_mode: policy::global_mode_to_proto(d.engine.global_mode()) as i32,
         containers: d.engine.bound_containers().into_iter().take(1024).collect(),
+        adopted: d.engine.adopted_cgroups().into_iter().take(1024).collect(),
+        sandbox_default_cgroup_id: d.engine.sandbox_default().map_or(0, |s| s.cgroup_id),
     }
+}
+
+/// The pod cgroup exists by the time the host sends this (the pause
+/// container runs before NRI RunPodSandbox), so there is no wait.
+fn set_sandbox_default(
+    d: &Shared,
+    request_id: u64,
+    s: &pb::SetSandboxDefault,
+) -> pb::ControlResponse {
+    let mut dm = d.borrow_mut();
+    let prepared = match dm.engine.sandbox_default_prepare(s) {
+        Ok(p) => p,
+        Err(Rejection { code, message }) => return error(request_id, code, message),
+    };
+    let default = match prepared {
+        None => None,
+        Some((path, mode, failure)) => match dm.cgroups.lookup(&path) {
+            Ok(Some(cgroup_id)) => Some(crate::state::SandboxDefault {
+                path,
+                cgroup_id,
+                mode,
+                failure,
+            }),
+            Ok(None) => {
+                return error(
+                    request_id,
+                    ErrorCode::NotFound,
+                    format!("pod cgroup {} does not exist", path.display()),
+                )
+            }
+            Err(e) => {
+                return error(
+                    request_id,
+                    ErrorCode::InvalidArgument,
+                    format!("pod cgroup {}: {e}", path.display()),
+                )
+            }
+        },
+    };
+    let set = default.is_some();
+    let res = dm.engine.set_sandbox_default(default);
+    drop(dm);
+    tracing::info!(closed = set, ok = res.is_ok(), "sandbox default updated");
+    engine_result(request_id, d, res)
 }
 
 fn set_mode(d: &Shared, request_id: u64, m: &pb::SetMode) -> pb::ControlResponse {
@@ -157,15 +204,21 @@ async fn wait_for_cgroup(
     request_id: u64,
     tx: mpsc::Sender<pb::ControlResponse>,
 ) {
-    let (timeout, poll) = {
-        let dm = d.borrow();
+    let (timeout, poll, wake) = {
+        let mut dm = d.borrow_mut();
+        dm.cgroup_waits.register(&ticket.cgroup_path);
         (
             Duration::from_millis(dm.cfg.bind_timeout_ms.into()),
             Duration::from_millis(dm.cfg.bind_poll_ms.into()),
+            dm.cgroup_waits.wake.clone(),
         )
     };
     let deadline = tokio::time::Instant::now() + timeout;
     let resp = loop {
+        // Enabled before the lookup, so a creation in between is not missed.
+        let created = wake.notified();
+        tokio::pin!(created);
+        created.as_mut().enable();
         let found = {
             let dm = d.borrow();
             if !dm.engine.ticket_is_current(&ticket) {
@@ -188,7 +241,13 @@ async fn wait_for_cgroup(
                 tracing::info!(container = %ticket.container_id, cgroup_id, ok = res.is_ok(), "container bound");
                 break engine_result(request_id, &d, res);
             }
-            Ok(None) if tokio::time::Instant::now() < deadline => tokio::time::sleep(poll).await,
+            Ok(None) if tokio::time::Instant::now() < deadline => {
+                // inotify wake-up (cgwatch), with a slow poll as the fallback.
+                tokio::select! {
+                    () = &mut created => {}
+                    () = tokio::time::sleep(poll) => {}
+                }
+            }
             Ok(None) => {
                 d.borrow_mut().engine.bind_abort(&ticket);
                 break ack(
@@ -210,7 +269,11 @@ async fn wait_for_cgroup(
             }
         }
     };
-    d.borrow_mut().pending_binds -= 1;
+    {
+        let mut dm = d.borrow_mut();
+        dm.pending_binds -= 1;
+        dm.cgroup_waits.unregister(&ticket.cgroup_path);
+    }
     // The connection may be gone; the binding itself stays in effect.
     let _ = tx.send(resp).await;
 }
@@ -294,6 +357,7 @@ fn handle(
             engine_result(id, d, res)
         }
         Req::SetMode(m) => set_mode(d, id, &m),
+        Req::SetSandboxDefault(s) => set_sandbox_default(d, id, &s),
         Req::GetStatus(_) => pb::ControlResponse {
             request_id: id,
             body: Some(Resp::Status(status(d))),
@@ -397,7 +461,7 @@ pub async fn serve<S: AsyncRead + AsyncWrite + 'static>(d: Shared, stream: S) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::daemon::fake::{FakeBpf, FakeCgroups};
     use crate::daemon::Daemon;
@@ -438,11 +502,19 @@ mod tests {
                 drops: vec![(1, 3)],
             }),
             cgroups: Box::new(cgroups),
+            cgroup_waits: crate::cgwatch::CgroupWaits::default(),
             hub: crate::events::EventHub::new(100, 1 << 20),
             events_ready: Rc::new(tokio::sync::Notify::new()),
             heartbeat_seq: 0,
             pending_binds: 0,
         }))
+    }
+
+    /// A daemon whose cgroup root is `root` (for the cgwatch tests).
+    pub(crate) fn daemon_with_root(root: &std::path::Path) -> Shared {
+        let d = daemon(FakeCgroups::default());
+        d.borrow_mut().cfg.cgroup_root = root.to_path_buf();
+        d
     }
 
     struct Client {
@@ -518,6 +590,63 @@ mod tests {
                 panic!()
             };
             assert_eq!(e.code, ErrorCode::Malformed as i32);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sandbox_default_over_the_channel() {
+        local(async {
+            let cgroups = FakeCgroups::default();
+            let d = daemon(cgroups.clone());
+            let mut c = start(&d);
+            c.send(1, hello()).await;
+            c.recv().await.unwrap();
+            let req = |parent: &str, failure: pb::FailurePolicy| {
+                Req::SetSandboxDefault(pb::SetSandboxDefault {
+                    cgroup_parent: parent.into(),
+                    mode: pb::Mode::Enforce as i32,
+                    failure: failure as i32,
+                })
+            };
+
+            c.send(2, req("kubepods-pod9.slice", pb::FailurePolicy::Closed))
+                .await;
+            let Some(Resp::Error(e)) = c.recv().await.unwrap().body else {
+                panic!("missing pod cgroup must be an error")
+            };
+            assert_eq!(e.code, ErrorCode::NotFound as i32);
+
+            cgroups
+                .0
+                .borrow_mut()
+                .insert(PathBuf::from("kubepods.slice/kubepods-pod9.slice"), 4242);
+            c.send(3, req("kubepods-pod9.slice", pb::FailurePolicy::Closed))
+                .await;
+            let Some(Resp::Ack(a)) = c.recv().await.unwrap().body else {
+                panic!("no Ack")
+            };
+            assert!(a.ok, "{}", a.error);
+
+            c.send(4, Req::GetStatus(pb::GetStatus {})).await;
+            let Some(Resp::Status(s)) = c.recv().await.unwrap().body else {
+                panic!("no Status")
+            };
+            assert_eq!(s.sandbox_default_cgroup_id, 4242);
+
+            c.send(5, req("../x", pb::FailurePolicy::Closed)).await;
+            let Some(Resp::Error(e)) = c.recv().await.unwrap().body else {
+                panic!("escape must be rejected")
+            };
+            assert_eq!(e.code, ErrorCode::InvalidArgument as i32);
+
+            c.send(6, req("kubepods-pod9.slice", pb::FailurePolicy::Open))
+                .await;
+            let Some(Resp::Ack(a)) = c.recv().await.unwrap().body else {
+                panic!("no Ack")
+            };
+            assert!(a.ok);
+            assert!(d.borrow().engine.sandbox_default().is_none());
         })
         .await;
     }

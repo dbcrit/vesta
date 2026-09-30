@@ -28,7 +28,7 @@ make guest-kernel guest-rootfs image-install
 |---|---|---|
 | `VERSION` | `0.1.0-dev` | `-X main.version` in the Go binaries, image tags, and the guest version (exported as `VESTA_GUEST_VERSION`). Must be semver without build metadata, at most 63 characters, because it becomes the `vesta.dev/guest-ready` label value and a directory name under `/opt/vesta/kata/` |
 | `REVISION` | `git rev-parse --short=12 HEAD` | `org.opencontainers.image.revision` label |
-| `REGISTRY` | `ghcr.io/vesta-dev` | Image names: `$(REGISTRY)/vesta-agent:$(VERSION)`, `$(REGISTRY)/vesta-install:$(VERSION)` |
+| `REGISTRY` | `ghcr.io/dbcrit` | Image names: `$(REGISTRY)/vesta-agent:$(VERSION)`, `$(REGISTRY)/vesta-install:$(VERSION)` |
 | `ARCH` | host `uname -m`, normalized to `x86_64` or `aarch64` | Guest kernel/rootfs arch. Derived: `OCI_ARCH` (`amd64`/`arm64`) and `BPF_ARCH` (`x86_64`/`arm64`) |
 | `GUESTD_BIN` | `images/guest/out/guestd/$(ARCH)/vesta-guestd` | guestd binary baked into the rootfs |
 | `BPF_OBJ_DIR` | `bpf/.output/$(BPF_ARCH)` | BPF objects baked into the rootfs |

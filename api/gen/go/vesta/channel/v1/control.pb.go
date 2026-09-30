@@ -489,6 +489,7 @@ type ControlRequest struct {
 	//	*ControlRequest_Unbind
 	//	*ControlRequest_SetMode
 	//	*ControlRequest_GetStatus
+	//	*ControlRequest_SetSandboxDefault
 	Body          isControlRequest_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -592,6 +593,15 @@ func (x *ControlRequest) GetGetStatus() *GetStatus {
 	return nil
 }
 
+func (x *ControlRequest) GetSetSandboxDefault() *SetSandboxDefault {
+	if x != nil {
+		if x, ok := x.Body.(*ControlRequest_SetSandboxDefault); ok {
+			return x.SetSandboxDefault
+		}
+	}
+	return nil
+}
+
 type isControlRequest_Body interface {
 	isControlRequest_Body()
 }
@@ -620,6 +630,10 @@ type ControlRequest_GetStatus struct {
 	GetStatus *GetStatus `protobuf:"bytes,15,opt,name=get_status,json=getStatus,proto3,oneof"`
 }
 
+type ControlRequest_SetSandboxDefault struct {
+	SetSandboxDefault *SetSandboxDefault `protobuf:"bytes,16,opt,name=set_sandbox_default,json=setSandboxDefault,proto3,oneof"`
+}
+
 func (*ControlRequest_Hello) isControlRequest_Body() {}
 
 func (*ControlRequest_ApplyPolicy) isControlRequest_Body() {}
@@ -631,6 +645,8 @@ func (*ControlRequest_Unbind) isControlRequest_Body() {}
 func (*ControlRequest_SetMode) isControlRequest_Body() {}
 
 func (*ControlRequest_GetStatus) isControlRequest_Body() {}
+
+func (*ControlRequest_SetSandboxDefault) isControlRequest_Body() {}
 
 type ControlResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -837,6 +853,11 @@ type HelloReply struct {
 	Progs             []*ProgStatus          `protobuf:"bytes,10,rep,name=progs,proto3" json:"progs,omitempty"`                                                   // max 64
 	GlobalMode        GlobalMode             `protobuf:"varint,11,opt,name=global_mode,json=globalMode,proto3,enum=vesta.channel.v1.GlobalMode" json:"global_mode,omitempty"`
 	AppliedGeneration uint64                 `protobuf:"varint,12,opt,name=applied_generation,json=appliedGeneration,proto3" json:"applied_generation,omitempty"` // 0 = baseline only
+	// policy_ready left in the pinned maps by a previous guestd in this guest
+	// boot (0 = none). Until a policy is applied, the adopted entries keep
+	// enforcing and ApplyPolicy with a lower generation is rejected, so the
+	// host must send at least this generation.
+	AdoptedGeneration uint64 `protobuf:"varint,13,opt,name=adopted_generation,json=adoptedGeneration,proto3" json:"adopted_generation,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -951,6 +972,13 @@ func (x *HelloReply) GetGlobalMode() GlobalMode {
 func (x *HelloReply) GetAppliedGeneration() uint64 {
 	if x != nil {
 		return x.AppliedGeneration
+	}
+	return 0
+}
+
+func (x *HelloReply) GetAdoptedGeneration() uint64 {
+	if x != nil {
+		return x.AdoptedGeneration
 	}
 	return 0
 }
@@ -1467,6 +1495,76 @@ func (x *Unbind) GetContainerId() string {
 	return ""
 }
 
+// Default for container cgroups in this pod that are not bound (yet): the
+// guest writes a pending cgroup_policy entry on the pod-level cgroup, which
+// the BPF ancestor lookup applies to every unbound cgroup below it. A bound
+// container's own entry is nearer and wins. With failure CLOSED and mode
+// ENFORCE, exec and connect in an unbound container cgroup are denied until
+// its BindContainer completes (ARCHITECTURE §2.5). failure OPEN (or
+// UNSPECIFIED) removes the entry. Acked with the applied generation.
+type SetSandboxDefault struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Pod-level cgroup parent as given to the runtime (NRI
+	// PodSandbox.linux.cgroup_parent): a systemd slice such as
+	// "kubepods-burstable-pod<uid>.slice", or a cgroupfs path. Max 4096 bytes.
+	CgroupParent  string        `protobuf:"bytes,1,opt,name=cgroup_parent,json=cgroupParent,proto3" json:"cgroup_parent,omitempty"`
+	Mode          Mode          `protobuf:"varint,2,opt,name=mode,proto3,enum=vesta.channel.v1.Mode" json:"mode,omitempty"`
+	Failure       FailurePolicy `protobuf:"varint,3,opt,name=failure,proto3,enum=vesta.channel.v1.FailurePolicy" json:"failure,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SetSandboxDefault) Reset() {
+	*x = SetSandboxDefault{}
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetSandboxDefault) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetSandboxDefault) ProtoMessage() {}
+
+func (x *SetSandboxDefault) ProtoReflect() protoreflect.Message {
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetSandboxDefault.ProtoReflect.Descriptor instead.
+func (*SetSandboxDefault) Descriptor() ([]byte, []int) {
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *SetSandboxDefault) GetCgroupParent() string {
+	if x != nil {
+		return x.CgroupParent
+	}
+	return ""
+}
+
+func (x *SetSandboxDefault) GetMode() Mode {
+	if x != nil {
+		return x.Mode
+	}
+	return Mode_MODE_UNSPECIFIED
+}
+
+func (x *SetSandboxDefault) GetFailure() FailurePolicy {
+	if x != nil {
+		return x.Failure
+	}
+	return FailurePolicy_FAILURE_POLICY_UNSPECIFIED
+}
+
 type SetMode struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Mode          GlobalMode             `protobuf:"varint,1,opt,name=mode,proto3,enum=vesta.channel.v1.GlobalMode" json:"mode,omitempty"`
@@ -1476,7 +1574,7 @@ type SetMode struct {
 
 func (x *SetMode) Reset() {
 	*x = SetMode{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[12]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1488,7 +1586,7 @@ func (x *SetMode) String() string {
 func (*SetMode) ProtoMessage() {}
 
 func (x *SetMode) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[12]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1501,7 +1599,7 @@ func (x *SetMode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMode.ProtoReflect.Descriptor instead.
 func (*SetMode) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{12}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SetMode) GetMode() GlobalMode {
@@ -1519,7 +1617,7 @@ type GetStatus struct {
 
 func (x *GetStatus) Reset() {
 	*x = GetStatus{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[13]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1531,7 +1629,7 @@ func (x *GetStatus) String() string {
 func (*GetStatus) ProtoMessage() {}
 
 func (x *GetStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[13]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1544,7 +1642,7 @@ func (x *GetStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatus.ProtoReflect.Descriptor instead.
 func (*GetStatus) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{13}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{14}
 }
 
 type Ack struct {
@@ -1560,7 +1658,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[14]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1572,7 +1670,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[14]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1585,7 +1683,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{14}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Ack) GetGeneration() uint64 {
@@ -1624,20 +1722,22 @@ func (x *Ack) GetWarnings() []string {
 }
 
 type Status struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Progs             []*ProgStatus          `protobuf:"bytes,1,rep,name=progs,proto3" json:"progs,omitempty"` // max 64
-	AppliedGeneration uint64                 `protobuf:"varint,2,opt,name=applied_generation,json=appliedGeneration,proto3" json:"applied_generation,omitempty"`
-	PolicyHash        []byte                 `protobuf:"bytes,3,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // SHA-256 of the canonical applied set, 32 bytes
-	Drops             []*DropCount           `protobuf:"bytes,4,rep,name=drops,proto3" json:"drops,omitempty"`                             // cumulative, max 16
-	GlobalMode        GlobalMode             `protobuf:"varint,5,opt,name=global_mode,json=globalMode,proto3,enum=vesta.channel.v1.GlobalMode" json:"global_mode,omitempty"`
-	Containers        []*BoundContainer      `protobuf:"bytes,6,rep,name=containers,proto3" json:"containers,omitempty"` // max 1024
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	Progs                  []*ProgStatus          `protobuf:"bytes,1,rep,name=progs,proto3" json:"progs,omitempty"` // max 64
+	AppliedGeneration      uint64                 `protobuf:"varint,2,opt,name=applied_generation,json=appliedGeneration,proto3" json:"applied_generation,omitempty"`
+	PolicyHash             []byte                 `protobuf:"bytes,3,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // SHA-256 of the canonical applied set, 32 bytes
+	Drops                  []*DropCount           `protobuf:"bytes,4,rep,name=drops,proto3" json:"drops,omitempty"`                             // cumulative, max 16
+	GlobalMode             GlobalMode             `protobuf:"varint,5,opt,name=global_mode,json=globalMode,proto3,enum=vesta.channel.v1.GlobalMode" json:"global_mode,omitempty"`
+	Containers             []*BoundContainer      `protobuf:"bytes,6,rep,name=containers,proto3" json:"containers,omitempty"`                                                            // max 1024
+	Adopted                []*AdoptedCgroup       `protobuf:"bytes,7,rep,name=adopted,proto3" json:"adopted,omitempty"`                                                                  // max 1024
+	SandboxDefaultCgroupId uint64                 `protobuf:"varint,8,opt,name=sandbox_default_cgroup_id,json=sandboxDefaultCgroupId,proto3" json:"sandbox_default_cgroup_id,omitempty"` // pod cgroup with the SetSandboxDefault entry, 0 = none
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *Status) Reset() {
 	*x = Status{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[15]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1649,7 +1749,7 @@ func (x *Status) String() string {
 func (*Status) ProtoMessage() {}
 
 func (x *Status) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[15]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1662,7 +1762,7 @@ func (x *Status) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Status.ProtoReflect.Descriptor instead.
 func (*Status) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{15}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Status) GetProgs() []*ProgStatus {
@@ -1707,6 +1807,82 @@ func (x *Status) GetContainers() []*BoundContainer {
 	return nil
 }
 
+func (x *Status) GetAdopted() []*AdoptedCgroup {
+	if x != nil {
+		return x.Adopted
+	}
+	return nil
+}
+
+func (x *Status) GetSandboxDefaultCgroupId() uint64 {
+	if x != nil {
+		return x.SandboxDefaultCgroupId
+	}
+	return 0
+}
+
+// A cgroup_policy entry adopted from a previous guestd that no BindContainer
+// has claimed yet. It keeps enforcing until re-bound or its cgroup is gone.
+type AdoptedCgroup struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CgroupId      uint64                 `protobuf:"varint,1,opt,name=cgroup_id,json=cgroupId,proto3" json:"cgroup_id,omitempty"`
+	PolicyId      uint32                 `protobuf:"varint,2,opt,name=policy_id,json=policyId,proto3" json:"policy_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,3,opt,name=generation,proto3" json:"generation,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AdoptedCgroup) Reset() {
+	*x = AdoptedCgroup{}
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AdoptedCgroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AdoptedCgroup) ProtoMessage() {}
+
+func (x *AdoptedCgroup) ProtoReflect() protoreflect.Message {
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AdoptedCgroup.ProtoReflect.Descriptor instead.
+func (*AdoptedCgroup) Descriptor() ([]byte, []int) {
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *AdoptedCgroup) GetCgroupId() uint64 {
+	if x != nil {
+		return x.CgroupId
+	}
+	return 0
+}
+
+func (x *AdoptedCgroup) GetPolicyId() uint32 {
+	if x != nil {
+		return x.PolicyId
+	}
+	return 0
+}
+
+func (x *AdoptedCgroup) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
 type ProgStatus struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`         // program table ID, e.g. "P1", "N1-connect4"; max 32 bytes
@@ -1723,7 +1899,7 @@ type ProgStatus struct {
 
 func (x *ProgStatus) Reset() {
 	*x = ProgStatus{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[16]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1735,7 +1911,7 @@ func (x *ProgStatus) String() string {
 func (*ProgStatus) ProtoMessage() {}
 
 func (x *ProgStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[16]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1748,7 +1924,7 @@ func (x *ProgStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProgStatus.ProtoReflect.Descriptor instead.
 func (*ProgStatus) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{16}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *ProgStatus) GetId() string {
@@ -1818,7 +1994,7 @@ type DropCount struct {
 
 func (x *DropCount) Reset() {
 	*x = DropCount{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[17]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1830,7 +2006,7 @@ func (x *DropCount) String() string {
 func (*DropCount) ProtoMessage() {}
 
 func (x *DropCount) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[17]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1843,7 +2019,7 @@ func (x *DropCount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropCount.ProtoReflect.Descriptor instead.
 func (*DropCount) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{17}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DropCount) GetEventType() uint32 {
@@ -1873,7 +2049,7 @@ type BoundContainer struct {
 
 func (x *BoundContainer) Reset() {
 	*x = BoundContainer{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[18]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1885,7 +2061,7 @@ func (x *BoundContainer) String() string {
 func (*BoundContainer) ProtoMessage() {}
 
 func (x *BoundContainer) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[18]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1898,7 +2074,7 @@ func (x *BoundContainer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BoundContainer.ProtoReflect.Descriptor instead.
 func (*BoundContainer) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{18}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *BoundContainer) GetContainerId() string {
@@ -1946,7 +2122,7 @@ type Error struct {
 
 func (x *Error) Reset() {
 	*x = Error{}
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[19]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1958,7 +2134,7 @@ func (x *Error) String() string {
 func (*Error) ProtoMessage() {}
 
 func (x *Error) ProtoReflect() protoreflect.Message {
-	mi := &file_vesta_channel_v1_control_proto_msgTypes[19]
+	mi := &file_vesta_channel_v1_control_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1971,7 +2147,7 @@ func (x *Error) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Error.ProtoReflect.Descriptor instead.
 func (*Error) Descriptor() ([]byte, []int) {
-	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{19}
+	return file_vesta_channel_v1_control_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Error) GetCode() ErrorCode {
@@ -1992,7 +2168,7 @@ var File_vesta_channel_v1_control_proto protoreflect.FileDescriptor
 
 const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1evesta/channel/v1/control.proto\x12\x10vesta.channel.v1\"\xa0\x03\n" +
+	"\x1evesta/channel/v1/control.proto\x12\x10vesta.channel.v1\"\xf7\x03\n" +
 	"\x0eControlRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\x04R\trequestId\x12/\n" +
@@ -2003,7 +2179,8 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"\x06unbind\x18\r \x01(\v2\x18.vesta.channel.v1.UnbindH\x00R\x06unbind\x126\n" +
 	"\bset_mode\x18\x0e \x01(\v2\x19.vesta.channel.v1.SetModeH\x00R\asetMode\x12<\n" +
 	"\n" +
-	"get_status\x18\x0f \x01(\v2\x1b.vesta.channel.v1.GetStatusH\x00R\tgetStatusB\x06\n" +
+	"get_status\x18\x0f \x01(\v2\x1b.vesta.channel.v1.GetStatusH\x00R\tgetStatus\x12U\n" +
+	"\x13set_sandbox_default\x18\x10 \x01(\v2#.vesta.channel.v1.SetSandboxDefaultH\x00R\x11setSandboxDefaultB\x06\n" +
 	"\x04body\"\x89\x02\n" +
 	"\x0fControlResponse\x12\x1d\n" +
 	"\n" +
@@ -2022,7 +2199,7 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"protoMinor\x12#\n" +
 	"\ragent_version\x18\x03 \x01(\tR\fagentVersion\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\x04 \x01(\tR\tsandboxId\"\xe9\x03\n" +
+	"sandbox_id\x18\x04 \x01(\tR\tsandboxId\"\x98\x04\n" +
 	"\n" +
 	"HelloReply\x12\x1f\n" +
 	"\vproto_major\x18\x01 \x01(\rR\n" +
@@ -2042,7 +2219,8 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	" \x03(\v2\x1c.vesta.channel.v1.ProgStatusR\x05progs\x12=\n" +
 	"\vglobal_mode\x18\v \x01(\x0e2\x1c.vesta.channel.v1.GlobalModeR\n" +
 	"globalMode\x12-\n" +
-	"\x12applied_generation\x18\f \x01(\x04R\x11appliedGeneration\"g\n" +
+	"\x12applied_generation\x18\f \x01(\x04R\x11appliedGeneration\x12-\n" +
+	"\x12adopted_generation\x18\r \x01(\x04R\x11adoptedGeneration\"g\n" +
 	"\vApplyPolicy\x12\x1e\n" +
 	"\n" +
 	"generation\x18\x01 \x01(\x04R\n" +
@@ -2082,7 +2260,11 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"generation\x18\x05 \x01(\x04R\n" +
 	"generation\"+\n" +
 	"\x06Unbind\x12!\n" +
-	"\fcontainer_id\x18\x01 \x01(\tR\vcontainerId\";\n" +
+	"\fcontainer_id\x18\x01 \x01(\tR\vcontainerId\"\x9f\x01\n" +
+	"\x11SetSandboxDefault\x12#\n" +
+	"\rcgroup_parent\x18\x01 \x01(\tR\fcgroupParent\x12*\n" +
+	"\x04mode\x18\x02 \x01(\x0e2\x16.vesta.channel.v1.ModeR\x04mode\x129\n" +
+	"\afailure\x18\x03 \x01(\x0e2\x1f.vesta.channel.v1.FailurePolicyR\afailure\";\n" +
 	"\aSetMode\x120\n" +
 	"\x04mode\x18\x01 \x01(\x0e2\x1c.vesta.channel.v1.GlobalModeR\x04mode\"\v\n" +
 	"\tGetStatus\"\x8a\x01\n" +
@@ -2093,7 +2275,7 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05error\x18\x03 \x01(\tR\x05error\x12!\n" +
 	"\fverifier_log\x18\x04 \x01(\fR\vverifierLog\x12\x1a\n" +
-	"\bwarnings\x18\x05 \x03(\tR\bwarnings\"\xc0\x02\n" +
+	"\bwarnings\x18\x05 \x03(\tR\bwarnings\"\xb6\x03\n" +
 	"\x06Status\x122\n" +
 	"\x05progs\x18\x01 \x03(\v2\x1c.vesta.channel.v1.ProgStatusR\x05progs\x12-\n" +
 	"\x12applied_generation\x18\x02 \x01(\x04R\x11appliedGeneration\x12\x1f\n" +
@@ -2104,7 +2286,15 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"globalMode\x12@\n" +
 	"\n" +
 	"containers\x18\x06 \x03(\v2 .vesta.channel.v1.BoundContainerR\n" +
-	"containers\"\xe4\x01\n" +
+	"containers\x129\n" +
+	"\aadopted\x18\a \x03(\v2\x1f.vesta.channel.v1.AdoptedCgroupR\aadopted\x129\n" +
+	"\x19sandbox_default_cgroup_id\x18\b \x01(\x04R\x16sandboxDefaultCgroupId\"i\n" +
+	"\rAdoptedCgroup\x12\x1b\n" +
+	"\tcgroup_id\x18\x01 \x01(\x04R\bcgroupId\x12\x1b\n" +
+	"\tpolicy_id\x18\x02 \x01(\rR\bpolicyId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x03 \x01(\x04R\n" +
+	"generation\"\xe4\x01\n" +
 	"\n" +
 	"ProgStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
@@ -2173,7 +2363,7 @@ const file_vesta_channel_v1_control_proto_rawDesc = "" +
 	"\x19ERROR_CODE_LIMIT_EXCEEDED\x10\x05\x12\x18\n" +
 	"\x14ERROR_CODE_NOT_READY\x10\x06\x12\x1c\n" +
 	"\x18ERROR_CODE_UNIMPLEMENTED\x10\a\x12\x17\n" +
-	"\x13ERROR_CODE_INTERNAL\x10\bBBZ@github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1b\x06proto3"
+	"\x13ERROR_CODE_INTERNAL\x10\bB?Z=github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1b\x06proto3"
 
 var (
 	file_vesta_channel_v1_control_proto_rawDescOnce sync.Once
@@ -2188,75 +2378,81 @@ func file_vesta_channel_v1_control_proto_rawDescGZIP() []byte {
 }
 
 var file_vesta_channel_v1_control_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_vesta_channel_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_vesta_channel_v1_control_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_vesta_channel_v1_control_proto_goTypes = []any{
-	(Mode)(0),               // 0: vesta.channel.v1.Mode
-	(FailurePolicy)(0),      // 1: vesta.channel.v1.FailurePolicy
-	(GlobalMode)(0),         // 2: vesta.channel.v1.GlobalMode
-	(Verdict)(0),            // 3: vesta.channel.v1.Verdict
-	(RootfsType)(0),         // 4: vesta.channel.v1.RootfsType
-	(Protocol)(0),           // 5: vesta.channel.v1.Protocol
-	(ProgState)(0),          // 6: vesta.channel.v1.ProgState
-	(ErrorCode)(0),          // 7: vesta.channel.v1.ErrorCode
-	(*ControlRequest)(nil),  // 8: vesta.channel.v1.ControlRequest
-	(*ControlResponse)(nil), // 9: vesta.channel.v1.ControlResponse
-	(*Hello)(nil),           // 10: vesta.channel.v1.Hello
-	(*HelloReply)(nil),      // 11: vesta.channel.v1.HelloReply
-	(*ApplyPolicy)(nil),     // 12: vesta.channel.v1.ApplyPolicy
-	(*PolicyBundle)(nil),    // 13: vesta.channel.v1.PolicyBundle
-	(*ExecRules)(nil),       // 14: vesta.channel.v1.ExecRules
-	(*ExecRule)(nil),        // 15: vesta.channel.v1.ExecRule
-	(*NetRules)(nil),        // 16: vesta.channel.v1.NetRules
-	(*NetRule)(nil),         // 17: vesta.channel.v1.NetRule
-	(*BindContainer)(nil),   // 18: vesta.channel.v1.BindContainer
-	(*Unbind)(nil),          // 19: vesta.channel.v1.Unbind
-	(*SetMode)(nil),         // 20: vesta.channel.v1.SetMode
-	(*GetStatus)(nil),       // 21: vesta.channel.v1.GetStatus
-	(*Ack)(nil),             // 22: vesta.channel.v1.Ack
-	(*Status)(nil),          // 23: vesta.channel.v1.Status
-	(*ProgStatus)(nil),      // 24: vesta.channel.v1.ProgStatus
-	(*DropCount)(nil),       // 25: vesta.channel.v1.DropCount
-	(*BoundContainer)(nil),  // 26: vesta.channel.v1.BoundContainer
-	(*Error)(nil),           // 27: vesta.channel.v1.Error
+	(Mode)(0),                 // 0: vesta.channel.v1.Mode
+	(FailurePolicy)(0),        // 1: vesta.channel.v1.FailurePolicy
+	(GlobalMode)(0),           // 2: vesta.channel.v1.GlobalMode
+	(Verdict)(0),              // 3: vesta.channel.v1.Verdict
+	(RootfsType)(0),           // 4: vesta.channel.v1.RootfsType
+	(Protocol)(0),             // 5: vesta.channel.v1.Protocol
+	(ProgState)(0),            // 6: vesta.channel.v1.ProgState
+	(ErrorCode)(0),            // 7: vesta.channel.v1.ErrorCode
+	(*ControlRequest)(nil),    // 8: vesta.channel.v1.ControlRequest
+	(*ControlResponse)(nil),   // 9: vesta.channel.v1.ControlResponse
+	(*Hello)(nil),             // 10: vesta.channel.v1.Hello
+	(*HelloReply)(nil),        // 11: vesta.channel.v1.HelloReply
+	(*ApplyPolicy)(nil),       // 12: vesta.channel.v1.ApplyPolicy
+	(*PolicyBundle)(nil),      // 13: vesta.channel.v1.PolicyBundle
+	(*ExecRules)(nil),         // 14: vesta.channel.v1.ExecRules
+	(*ExecRule)(nil),          // 15: vesta.channel.v1.ExecRule
+	(*NetRules)(nil),          // 16: vesta.channel.v1.NetRules
+	(*NetRule)(nil),           // 17: vesta.channel.v1.NetRule
+	(*BindContainer)(nil),     // 18: vesta.channel.v1.BindContainer
+	(*Unbind)(nil),            // 19: vesta.channel.v1.Unbind
+	(*SetSandboxDefault)(nil), // 20: vesta.channel.v1.SetSandboxDefault
+	(*SetMode)(nil),           // 21: vesta.channel.v1.SetMode
+	(*GetStatus)(nil),         // 22: vesta.channel.v1.GetStatus
+	(*Ack)(nil),               // 23: vesta.channel.v1.Ack
+	(*Status)(nil),            // 24: vesta.channel.v1.Status
+	(*AdoptedCgroup)(nil),     // 25: vesta.channel.v1.AdoptedCgroup
+	(*ProgStatus)(nil),        // 26: vesta.channel.v1.ProgStatus
+	(*DropCount)(nil),         // 27: vesta.channel.v1.DropCount
+	(*BoundContainer)(nil),    // 28: vesta.channel.v1.BoundContainer
+	(*Error)(nil),             // 29: vesta.channel.v1.Error
 }
 var file_vesta_channel_v1_control_proto_depIdxs = []int32{
 	10, // 0: vesta.channel.v1.ControlRequest.hello:type_name -> vesta.channel.v1.Hello
 	12, // 1: vesta.channel.v1.ControlRequest.apply_policy:type_name -> vesta.channel.v1.ApplyPolicy
 	18, // 2: vesta.channel.v1.ControlRequest.bind_container:type_name -> vesta.channel.v1.BindContainer
 	19, // 3: vesta.channel.v1.ControlRequest.unbind:type_name -> vesta.channel.v1.Unbind
-	20, // 4: vesta.channel.v1.ControlRequest.set_mode:type_name -> vesta.channel.v1.SetMode
-	21, // 5: vesta.channel.v1.ControlRequest.get_status:type_name -> vesta.channel.v1.GetStatus
-	11, // 6: vesta.channel.v1.ControlResponse.hello_reply:type_name -> vesta.channel.v1.HelloReply
-	22, // 7: vesta.channel.v1.ControlResponse.ack:type_name -> vesta.channel.v1.Ack
-	23, // 8: vesta.channel.v1.ControlResponse.status:type_name -> vesta.channel.v1.Status
-	27, // 9: vesta.channel.v1.ControlResponse.error:type_name -> vesta.channel.v1.Error
-	24, // 10: vesta.channel.v1.HelloReply.progs:type_name -> vesta.channel.v1.ProgStatus
-	2,  // 11: vesta.channel.v1.HelloReply.global_mode:type_name -> vesta.channel.v1.GlobalMode
-	13, // 12: vesta.channel.v1.ApplyPolicy.bundles:type_name -> vesta.channel.v1.PolicyBundle
-	0,  // 13: vesta.channel.v1.PolicyBundle.mode:type_name -> vesta.channel.v1.Mode
-	1,  // 14: vesta.channel.v1.PolicyBundle.failure:type_name -> vesta.channel.v1.FailurePolicy
-	14, // 15: vesta.channel.v1.PolicyBundle.exec:type_name -> vesta.channel.v1.ExecRules
-	16, // 16: vesta.channel.v1.PolicyBundle.net:type_name -> vesta.channel.v1.NetRules
-	3,  // 17: vesta.channel.v1.ExecRules.default_verdict:type_name -> vesta.channel.v1.Verdict
-	15, // 18: vesta.channel.v1.ExecRules.rules:type_name -> vesta.channel.v1.ExecRule
-	3,  // 19: vesta.channel.v1.ExecRule.verdict:type_name -> vesta.channel.v1.Verdict
-	3,  // 20: vesta.channel.v1.NetRules.default_egress:type_name -> vesta.channel.v1.Verdict
-	17, // 21: vesta.channel.v1.NetRules.egress:type_name -> vesta.channel.v1.NetRule
-	5,  // 22: vesta.channel.v1.NetRule.protocol:type_name -> vesta.channel.v1.Protocol
-	3,  // 23: vesta.channel.v1.NetRule.verdict:type_name -> vesta.channel.v1.Verdict
-	4,  // 24: vesta.channel.v1.BindContainer.rootfs:type_name -> vesta.channel.v1.RootfsType
-	2,  // 25: vesta.channel.v1.SetMode.mode:type_name -> vesta.channel.v1.GlobalMode
-	24, // 26: vesta.channel.v1.Status.progs:type_name -> vesta.channel.v1.ProgStatus
-	25, // 27: vesta.channel.v1.Status.drops:type_name -> vesta.channel.v1.DropCount
-	2,  // 28: vesta.channel.v1.Status.global_mode:type_name -> vesta.channel.v1.GlobalMode
-	26, // 29: vesta.channel.v1.Status.containers:type_name -> vesta.channel.v1.BoundContainer
-	6,  // 30: vesta.channel.v1.ProgStatus.state:type_name -> vesta.channel.v1.ProgState
-	7,  // 31: vesta.channel.v1.Error.code:type_name -> vesta.channel.v1.ErrorCode
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	21, // 4: vesta.channel.v1.ControlRequest.set_mode:type_name -> vesta.channel.v1.SetMode
+	22, // 5: vesta.channel.v1.ControlRequest.get_status:type_name -> vesta.channel.v1.GetStatus
+	20, // 6: vesta.channel.v1.ControlRequest.set_sandbox_default:type_name -> vesta.channel.v1.SetSandboxDefault
+	11, // 7: vesta.channel.v1.ControlResponse.hello_reply:type_name -> vesta.channel.v1.HelloReply
+	23, // 8: vesta.channel.v1.ControlResponse.ack:type_name -> vesta.channel.v1.Ack
+	24, // 9: vesta.channel.v1.ControlResponse.status:type_name -> vesta.channel.v1.Status
+	29, // 10: vesta.channel.v1.ControlResponse.error:type_name -> vesta.channel.v1.Error
+	26, // 11: vesta.channel.v1.HelloReply.progs:type_name -> vesta.channel.v1.ProgStatus
+	2,  // 12: vesta.channel.v1.HelloReply.global_mode:type_name -> vesta.channel.v1.GlobalMode
+	13, // 13: vesta.channel.v1.ApplyPolicy.bundles:type_name -> vesta.channel.v1.PolicyBundle
+	0,  // 14: vesta.channel.v1.PolicyBundle.mode:type_name -> vesta.channel.v1.Mode
+	1,  // 15: vesta.channel.v1.PolicyBundle.failure:type_name -> vesta.channel.v1.FailurePolicy
+	14, // 16: vesta.channel.v1.PolicyBundle.exec:type_name -> vesta.channel.v1.ExecRules
+	16, // 17: vesta.channel.v1.PolicyBundle.net:type_name -> vesta.channel.v1.NetRules
+	3,  // 18: vesta.channel.v1.ExecRules.default_verdict:type_name -> vesta.channel.v1.Verdict
+	15, // 19: vesta.channel.v1.ExecRules.rules:type_name -> vesta.channel.v1.ExecRule
+	3,  // 20: vesta.channel.v1.ExecRule.verdict:type_name -> vesta.channel.v1.Verdict
+	3,  // 21: vesta.channel.v1.NetRules.default_egress:type_name -> vesta.channel.v1.Verdict
+	17, // 22: vesta.channel.v1.NetRules.egress:type_name -> vesta.channel.v1.NetRule
+	5,  // 23: vesta.channel.v1.NetRule.protocol:type_name -> vesta.channel.v1.Protocol
+	3,  // 24: vesta.channel.v1.NetRule.verdict:type_name -> vesta.channel.v1.Verdict
+	4,  // 25: vesta.channel.v1.BindContainer.rootfs:type_name -> vesta.channel.v1.RootfsType
+	0,  // 26: vesta.channel.v1.SetSandboxDefault.mode:type_name -> vesta.channel.v1.Mode
+	1,  // 27: vesta.channel.v1.SetSandboxDefault.failure:type_name -> vesta.channel.v1.FailurePolicy
+	2,  // 28: vesta.channel.v1.SetMode.mode:type_name -> vesta.channel.v1.GlobalMode
+	26, // 29: vesta.channel.v1.Status.progs:type_name -> vesta.channel.v1.ProgStatus
+	27, // 30: vesta.channel.v1.Status.drops:type_name -> vesta.channel.v1.DropCount
+	2,  // 31: vesta.channel.v1.Status.global_mode:type_name -> vesta.channel.v1.GlobalMode
+	28, // 32: vesta.channel.v1.Status.containers:type_name -> vesta.channel.v1.BoundContainer
+	25, // 33: vesta.channel.v1.Status.adopted:type_name -> vesta.channel.v1.AdoptedCgroup
+	6,  // 34: vesta.channel.v1.ProgStatus.state:type_name -> vesta.channel.v1.ProgState
+	7,  // 35: vesta.channel.v1.Error.code:type_name -> vesta.channel.v1.ErrorCode
+	36, // [36:36] is the sub-list for method output_type
+	36, // [36:36] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_vesta_channel_v1_control_proto_init() }
@@ -2271,6 +2467,7 @@ func file_vesta_channel_v1_control_proto_init() {
 		(*ControlRequest_Unbind)(nil),
 		(*ControlRequest_SetMode)(nil),
 		(*ControlRequest_GetStatus)(nil),
+		(*ControlRequest_SetSandboxDefault)(nil),
 	}
 	file_vesta_channel_v1_control_proto_msgTypes[1].OneofWrappers = []any{
 		(*ControlResponse_HelloReply)(nil),
@@ -2284,7 +2481,7 @@ func file_vesta_channel_v1_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_vesta_channel_v1_control_proto_rawDesc), len(file_vesta_channel_v1_control_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   20,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

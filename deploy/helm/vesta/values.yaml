@@ -128,6 +128,10 @@ rbac:
   # the node its pod runs on (bound tokens carry the node name).
   nodeLabelPolicy:
     enabled: true
+  # ValidatingAdmissionPolicy limiting the agent's VestaPolicy status writes
+  # (policies.source kubernetes) to the status.nodes entry of its own node.
+  policyStatusPolicy:
+    enabled: true
 
 nri:
   # vesta-install enables containerd's NRI default validator in its drop-in
@@ -151,8 +155,26 @@ nri:
 uninstall:
   enabled: false
 
+policies:
+  # Where vesta-agent gets its VestaPolicy objects:
+  #   static      staticPolicies below, written to a ConfigMap the agent
+  #               re-reads every reloadInterval (no API access needed)
+  #   kubernetes  VestaPolicy custom resources in all namespaces, watched
+  #               through the API server. The agent then gets a token, read
+  #               access to vestapolicies and patch on vestapolicies/status
+  #               (its own node's entry only, see rbac.policyStatusPolicy).
+  # The CRD (crds/) is installed either way.
+  source: static
+  # How often the static policy file is re-read.
+  reloadInterval: 10s
+  # kubernetes: how long the agent waits for the first sync before it
+  # registers its NRI plugin anyway.
+  syncTimeout: 30s
+
 # Static VestaPolicy objects (vesta.dev/v1alpha1), written as one multi-document
-# file the agent loads with policyFile. Empty: monitor only.
+# file the agent loads with policyFile (policies.source static). Empty: monitor
+# only. Changing them updates the ConfigMap, which the agent picks up without a
+# restart.
 staticPolicies: []
 
 metrics:

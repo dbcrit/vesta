@@ -21,7 +21,7 @@ plugins:
 # Source repository. Placeholder module path; change it here when the
 # repository moves. Pages link to source files as
 # {{ site.vesta_repo_url }}/blob/main/<path>.
-vesta_repo_url: https://github.com/vesta-dev/vesta
+vesta_repo_url: https://github.com/dbcrit/vesta
 
 # Rewrite links between .md files to the generated pages.
 relative_links:
@@ -30,7 +30,7 @@ relative_links:
 
 aux_links:
   "vesta on GitHub":
-    - "https://github.com/vesta-dev/vesta"
+    - "https://github.com/dbcrit/vesta"
 aux_links_new_tab: true
 
 search_enabled: true
@@ -59,7 +59,7 @@ footer_content: >-
 
 gh_edit_link: true
 gh_edit_link_text: "Edit this page on GitHub"
-gh_edit_repository: "https://github.com/vesta-dev/vesta"
+gh_edit_repository: "https://github.com/dbcrit/vesta"
 gh_edit_branch: "main"
 gh_edit_source: docs
 gh_edit_view_mode: "tree"

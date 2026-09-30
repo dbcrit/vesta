@@ -49,6 +49,7 @@ message ControlRequest {
     Unbind unbind = 13;
     SetMode set_mode = 14;
     GetStatus get_status = 15;
+    SetSandboxDefault set_sandbox_default = 16;
   }
 }
 
@@ -85,6 +86,11 @@ message HelloReply {
   repeated ProgStatus progs = 10;   // max 64
   GlobalMode global_mode = 11;
   uint64 applied_generation = 12;   // 0 = baseline only
+  // policy_ready left in the pinned maps by a previous guestd in this guest
+  // boot (0 = none). Until a policy is applied, the adopted entries keep
+  // enforcing and ApplyPolicy with a lower generation is rejected, so the
+  // host must send at least this generation.
+  uint64 adopted_generation = 13;
 }
 
 // Feature strings (unknown ones are ignored by the host):
@@ -199,6 +205,22 @@ message Unbind {
   string container_id = 1;
 }
 
+// Default for container cgroups in this pod that are not bound (yet): the
+// guest writes a pending cgroup_policy entry on the pod-level cgroup, which
+// the BPF ancestor lookup applies to every unbound cgroup below it. A bound
+// container's own entry is nearer and wins. With failure CLOSED and mode
+// ENFORCE, exec and connect in an unbound container cgroup are denied until
+// its BindContainer completes (ARCHITECTURE §2.5). failure OPEN (or
+// UNSPECIFIED) removes the entry. Acked with the applied generation.
+message SetSandboxDefault {
+  // Pod-level cgroup parent as given to the runtime (NRI
+  // PodSandbox.linux.cgroup_parent): a systemd slice such as
+  // "kubepods-burstable-pod<uid>.slice", or a cgroupfs path. Max 4096 bytes.
+  string cgroup_parent = 1;
+  Mode mode = 2;
+  FailurePolicy failure = 3;
+}
+
 message SetMode {
   GlobalMode mode = 1;
 }
@@ -222,6 +244,16 @@ message Status {
   repeated DropCount drops = 4;            // cumulative, max 16
   GlobalMode global_mode = 5;
   repeated BoundContainer containers = 6;  // max 1024
+  repeated AdoptedCgroup adopted = 7;      // max 1024
+  uint64 sandbox_default_cgroup_id = 8;     // pod cgroup with the SetSandboxDefault entry, 0 = none
+}
+
+// A cgroup_policy entry adopted from a previous guestd that no BindContainer
+// has claimed yet. It keeps enforcing until re-bound or its cgroup is gone.
+message AdoptedCgroup {
+  uint64 cgroup_id = 1;
+  uint32 policy_id = 2;
+  uint64 generation = 3;
 }
 
 enum ProgState {

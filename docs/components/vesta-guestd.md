@@ -44,7 +44,7 @@ Any other argument prints the usage and exits with status 2. Logs go to stderr t
 | `replay_max_events` | `16384` | 1 to 1000000 |
 | `replay_max_bytes` | `8388608` (8 MiB) | 64 KiB to 256 MiB, approximate heap size |
 | `bind_timeout_ms` | `10000` | 100 to 120000 |
-| `bind_poll_ms` | `20` | 5 to 1000 |
+| `bind_poll_ms` | `100` | 5 to 1000. Fallback re-check interval; the wait is woken by inotify |
 | `frame_timeout_ms` | `10000` | 100 to 120000 |
 | `write_timeout_ms` | `10000` | 100 to 120000 |
 | `gc_interval_ms` | `30000` | 1000 to 3600000 |
@@ -165,7 +165,7 @@ A bound container whose policy ID is no longer in the applied policy becomes mon
    - refuse the bind if that directory is a protected cgroup or an ancestor of one (guestd's own, `system.slice/kata-agent.service`), because the BPF ancestor lookup would then apply the policy to guestd or kata-agent;
    - refuse a `policy_id` above 1024, and return `NOT_FOUND` for a `policy_id` not in the applied generation when the requested generation is already applied;
    - refuse more than 4096 bindings.
-2. **Wait.** A task polls for the cgroup every `bind_poll_ms`. The lookup opens the path with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)` and requires a cgroup2 filesystem; the cgroup id is the directory's inode number. If a newer bind for the same container arrives, the older one is acked `ok = false` ("superseded").
+2. **Wait.** A task waits for the cgroup to appear. `cgwatch.rs` keeps one inotify watch (`IN_CREATE | IN_MOVED_TO`, no symlink following) on the deepest existing directory on the way to each pending cgroup path, moves it down as kata-agent creates intermediate cgroups, and wakes the waiting binds on every creation; each bind then re-checks its own path. The bind also re-checks every `bind_poll_ms` as a fallback, so a missed event or an unavailable inotify only delays it. The lookup opens the path with `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)` and requires a cgroup2 filesystem; the cgroup id is the directory's inode number. If a newer bind for the same container arrives, the older one is acked `ok = false` ("superseded").
 3. **Complete** (`bind_complete`) once the cgroup exists: refuse it if that cgroup is already bound to another container, check that the exec rules still fit the map, take over any adopted orphan entry for that cgroup, resolve the container's exec rules, and reconcile. On failure, the previous state is restored.
 4. **Ack.** `ok = true` with the binding's generation. If the requested generation is not applied yet, the binding is written with `VESTA_CGF_PENDING` and the `[baseline]` mode and failure, and the ack carries the **applied** generation plus a warning, so the host gate does not treat it as confirmed.
 5. **Timeout.** If the cgroup does not appear within `bind_timeout_ms`, the pending bind is dropped and acked `ok = false`, generation 0.
@@ -185,7 +185,7 @@ The consumer waits on the ring buffer's epoll fd through tokio (with a 1 s tick 
 - `container_id` from the bound cgroup id;
 - the exe path (length clamped), argv split on NUL (at most 256 entries), flags, policy reference and connect details.
 
-The process ancestry chain (`Event.chain`) is **not filled** yet.
+**Process ancestry (`ancestry.rs`).** Every exec record adds `tgid → (ppid, comm, exe_path)` to a cache of up to 4096 processes (oldest insertion evicted first). Each event's `chain` walks `ppid` through the cache, nearest parent first, up to 8 entries; a parent not in the cache is included with its pid only and ends the walk, and a repeated pid stops it. Connect events without an executable path get it from the cache when the cached entry has the same parent (a guard against reused pids). This is best effort: processes that have not exec'd since guestd started are unknown, and there are no exit events, so an entry can outlive its process.
 
 ### Replay buffer and backpressure
 
@@ -227,7 +227,7 @@ guestd is expected to restart (`Restart=always`, no start limit). Within one gue
 - **Links.** For each program, the new link is attached first, then the old pin at `<pin_root>/links/<name>` is removed and the new link pinned. There is no enforcement gap.
 - **Maps.** A pinned map is compatible if its type, key size, value size, max entries and flags match the new object. The seven policy-state maps (`config`, `global_mode`, `policy_ready`, `cgroup_policy`, `exec_rules`, `net_rules_v4`, `net_rules_v6`) are reused **all together or not at all**; if any is missing or incompatible, all of them are replaced with empty maps and a warning is logged. `events` and `drop_counters` are reused individually when compatible. A reused `config` must carry ABI version 1.
 - **Adoption.** Reused `cgroup_policy` entries become orphans that keep enforcing until the host binds that cgroup again or GC removes them. Adopted rules stay installed while an orphan references their `policy_id` (net rules until that policy ID is applied again). The adopted `global_mode` is kept.
-- **Open items.** After a restart, `HelloReply` reports `applied_generation = 0` until the host re-applies, `Status` does not list orphans, and `policy_ready` keeps the old generation meanwhile.
+- **Generation floor.** The adopted `policy_ready` value is reported as `HelloReply.adopted_generation`. Until the host applies a policy, `ApplyPolicy` below it is rejected, so the policy generation never goes backwards within a guest boot; `applied_generation` stays `0` until then. `Status.adopted` lists the orphans.
 
 ## Capabilities and systemd unit
 

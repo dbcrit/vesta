@@ -199,6 +199,7 @@ Guest-asserted. The host uses it only for the eligibility check, logging, the ta
 | `progs` | 10 | `repeated ProgStatus` | ≤ 64 |
 | `global_mode` | 11 | `GlobalMode` | Current kill-switch state |
 | `applied_generation` | 12 | `uint64` | `0` = no `ApplyPolicy` in force |
+| `adopted_generation` | 13 | `uint64` | `policy_ready` left by a previous guestd in this guest boot, `0` = none. Until a policy is applied, `ApplyPolicy` below it is rejected |
 
 Feature strings (unknown ones are ignored by the host):
 
@@ -267,13 +268,14 @@ Across all bundles, the guest also enforces the map capacities from the [BPF ABI
 |---|---|---|
 | Validation fails (any rule above, or `MODE_ENFORCE` when the guest cannot enforce) | `Error{INVALID_ARGUMENT}` or `Error{LIMIT_EXCEEDED}` | Unchanged |
 | `generation` < applied generation | `Error{INVALID_ARGUMENT}` | Unchanged |
+| Nothing applied yet and `generation` < `adopted_generation` | `Error{INVALID_ARGUMENT}` | Unchanged (adopted entries keep enforcing) |
 | `generation` == applied generation | `Ack{generation, ok: true}`, no warnings | Unchanged (no-op, even if the content differs) |
 | Map writes fail | `Ack{ok: false, generation: <still applied>, error}` | Rolled back to the previous set. Retrying the same generation is not a no-op |
 | Applied | `Ack{generation, ok: true, warnings}` | New set in force, `policy_ready` = generation |
 
 Warnings include unresolved exec paths, overlapping net rule keys ("deny wins"), and bound containers whose `policy_id` is no longer defined (they become monitor-only).
 
-**Host side.** The agent sends its compiled set's generation. If the guest's `applied_generation` is higher (for example after an agent restart with an older clock), it sends `applied_generation + 1` instead. An `Error`, `ok: false`, or an ack for another generation marks the policy as *not applied* for this sandbox. The agent logs an error, sets `vesta_policy_generation_lag` to 1, and fails every later bind that names a policy. Binds with no policy (monitor-only) still go through.
+**Host side.** The agent sends its compiled set's generation. If the guest's `applied_generation` is higher (for example after an agent restart with an older clock), it sends `applied_generation + 1` instead. If nothing is applied yet and the guest's `adopted_generation` is higher (guestd restarted and the agent's generation is older), it sends `adopted_generation + 1`. An `Error`, `ok: false`, or an ack for another generation marks the policy as *not applied* for this sandbox. The agent logs an error, sets `vesta_policy_generation_lag` to 1, and fails every later bind that names a policy. Binds with no policy (monitor-only) still go through.
 
 ### BindContainer
 
@@ -304,7 +306,7 @@ The guest derives the guest cgroup directory from `cgroup_path` with kata-agent 
 | More than 4096 bound containers | `LIMIT_EXCEEDED` |
 | More than 256 binds waiting for their cgroup | `LIMIT_EXCEEDED` |
 
-**Otherwise the ack is deferred.** The guest polls for the cgroup every `bind_poll_ms` (default 20 ms) for up to `bind_timeout_ms` (default 10 s). kata-agent creates the cgroup after the NRI hook has returned, so this ack typically arrives after other responses. Outcomes:
+**Otherwise the ack is deferred.** The guest waits for the cgroup for up to `bind_timeout_ms` (default 10 s), woken by an inotify watch on the cgroup tree, with a fallback re-check every `bind_poll_ms` (default 100 ms). kata-agent creates the cgroup after the NRI hook has returned, so this ack typically arrives after other responses. Outcomes:
 
 | Case | Response |
 |---|---|
@@ -334,6 +336,20 @@ Response: `Ack{generation: <applied>, ok: true}`. If the container was not bound
 
 Response: `Ack{generation: <applied>, ok}`. For `DETACHED`, guestd first writes `global_mode` (programs stand down) and then detaches the programs. For `NORMAL` and `AUDIT_ONLY`, it re-attaches first and then writes the mode. An undefined value gets `Error{INVALID_ARGUMENT}`. The agent sends `SetMode` only during the handshake, when the guest's mode differs from its configured `globalMode`. A refused `SetMode` is logged and does not end the epoch.
 
+### SetSandboxDefault
+
+| Field | # | Type | Limit |
+|---|---|---|---|
+| `cgroup_parent` | 1 | `string` | ≤ 4096 bytes. NRI `PodSandbox.linux.cgroup_parent`: a systemd slice (expanded like container slices) or a cgroupfs path |
+| `mode` | 2 | `Mode` | |
+| `failure` | 3 | `FailurePolicy` | `OPEN`/`UNSPECIFIED` removes the default |
+
+Sets the default for the pod's container cgroups that are not bound: guestd writes a pending `cgroup_policy` entry on the pod-level cgroup, which the BPF ancestor lookup applies to every unbound cgroup below it ([abi.md](../abi.md) decision step 2). With `CLOSED` and `ENFORCE`, exec and connect there are denied until the container's bind completes.
+
+Response: `Ack{generation: <applied>, ok}`. A path that escapes the cgroup root, is the root, or contains guestd's or kata-agent's cgroup gets `Error{INVALID_ARGUMENT}`; `ENFORCE` on a guest without enforce support too. A pod cgroup that does not exist gets `Error{NOT_FOUND}` (the pause container runs before the host connects, so it normally exists). Map write failures get `Ack{ok: false}`. The entry is removed by GC once the pod cgroup is gone, and a later `BindContainer` whose cgroup is not directly under the pod cgroup is acked with a warning.
+
+**Host side.** The agent sends it on every connect after `ApplyPolicy` and `SetMode`: `CLOSED`/`ENFORCE` when any policy selecting the pod (for any container) is `Enforce` with `failurePolicy: Closed`, otherwise `OPEN`, which also clears an entry a restarted guestd adopted. It is skipped when the runtime gave no cgroup parent. A refusal is logged and does not end the session; the NRI start gate still applies.
+
 ### GetStatus and Status
 
 `GetStatus` has no fields. The guest answers with `Status`. The current agent never sends `GetStatus`; it relies on heartbeats.
@@ -346,8 +362,12 @@ Response: `Ack{generation: <applied>, ok}`. For `DETACHED`, guestd first writes 
 | `drops` | 4 | `repeated DropCount` | ≤ 16, cumulative ring buffer drops |
 | `global_mode` | 5 | `GlobalMode` | |
 | `containers` | 6 | `repeated BoundContainer` | ≤ 1024 (guestd truncates) |
+| `adopted` | 7 | `repeated AdoptedCgroup` | ≤ 1024 (guestd truncates) |
+| `sandbox_default_cgroup_id` | 8 | `uint64` | Pod cgroup carrying the `SetSandboxDefault` entry, `0` = none |
 
 **`BoundContainer`**: `container_id` (1), `cgroup_id` (2), `policy_id` (3), `generation` (4), `pending` (5, bind received but cgroup not seen yet).
+
+**`AdoptedCgroup`**: `cgroup_id` (1), `policy_id` (2), `generation` (3). A `cgroup_policy` entry adopted from a previous guestd that no `BindContainer` has claimed yet; it keeps enforcing until re-bound or its cgroup is gone.
 
 ### Ack and Error
 
