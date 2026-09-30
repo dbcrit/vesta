@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builder for bpf/ and guest/ (vesta-guestd). Alpine/musl so vesta-guestd is
+# a fully static binary: it does not depend on the guest rootfs' libc, the
+# same way Kata builds kata-agent for x86_64 (musl). libbpf is vendored by
+# libbpf-sys (v1.7.0) and linked statically with Alpine's libelf.a/libz.a/libzstd.a.
+#
+#   docker build -f guest/Dockerfile.build -t vesta-guest-build:local guest
+#   guest/hack/in-builder.sh make -C bpf
+#   guest/hack/in-builder.sh cargo test --manifest-path guest/Cargo.toml
+FROM docker.io/library/rust:1.98.1-alpine3.24@sha256:7cc1c22d77d9432f7fe012a70e6d3e555af54c2a6832700ed7d553f1769ae89f
+
+# libbpf-dev provides the libbpf 1.7.0 BPF-side headers (bpf_helpers.h, ...)
+# for the standalone bpf/ Makefile; libbpf-cargo uses its bundled 1.7.0 copy.
+RUN apk add --no-cache \
+		bash \
+		bpftool \
+		clang21 \
+		elfutils-dev \
+		libbpf-dev \
+		linux-headers \
+		llvm21 \
+		make \
+		musl-dev \
+		pkgconf \
+		protobuf-dev \
+		protoc \
+		zlib-dev \
+		zlib-static \
+		zstd-dev \
+		zstd-static \
+	&& ln -sf /usr/lib/llvm21/bin/clang /usr/local/bin/clang \
+	&& for t in llvm-strip llvm-readelf llvm-objdump; do ln -sf /usr/lib/llvm21/bin/$t /usr/local/bin/$t; done \
+	&& rustup component add rustfmt clippy \
+	# Alpine's libelf.a exports crc32 (elfutils lib/crc32.c), which clashes with
+	# zlib's in a static link. Only crc32_file.o uses it (not libbpf); drop the
+	# member so that reference binds to zlib's compatible crc32.
+	&& mkdir -p /opt/vesta/lib \
+	&& cp /usr/lib/libelf.a /opt/vesta/lib/libelf.a \
+	&& ar d /opt/vesta/lib/libelf.a crc32.o \
+	&& ln -s /usr/lib/libz.a /opt/vesta/lib/libz.a
+
+# x86_64-unknown-linux-musl links statically (crt-static) by default.
+# libbpf-sys links libelf.a from LIBBPF_SYS_LIBRARY_PATH (the patched copy); Alpine's libelf.a
+# is built with zstd, so libzstd.a is linked too.
+ENV CARGO_HOME=/usr/local/cargo \
+	PROTOC=/usr/bin/protoc \
+	LIBBPF_SYS_LIBRARY_PATH=/opt/vesta/lib \
+	CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C link-arg=-l:libzstd.a"
+WORKDIR /src

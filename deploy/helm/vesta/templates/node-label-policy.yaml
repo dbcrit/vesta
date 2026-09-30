@@ -1,0 +1,65 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- if and .Values.rbac.create .Values.rbac.nodeLabelPolicy.enabled }}
+{{- $name := printf "%s-node-label" (include "vesta.fullname" .) }}
+{{- $user := printf "system:serviceaccount:%s:%s" .Release.Namespace (include "vesta.serviceAccountName" .) }}
+# Node updates by the vesta service account may only add, change or remove
+# vesta.dev/guest-ready, and only on the node the token was issued for
+# (bound service account tokens carry the node name since Kubernetes 1.30).
+# nodes/status is not granted by RBAC at all.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["nodes"]
+  matchConditions:
+    - name: vesta-service-account
+      expression: request.userInfo.username == {{ $user | quote }}
+  variables:
+    - name: key
+      expression: "'vesta.dev/guest-ready'"
+    - name: tokenNode
+      expression: >-
+        'authentication.kubernetes.io/node-name' in request.userInfo.extra &&
+        size(request.userInfo.extra['authentication.kubernetes.io/node-name']) == 1
+        ? request.userInfo.extra['authentication.kubernetes.io/node-name'][0] : ''
+    - name: oldLabels
+      expression: "has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: newLabels
+      expression: "has(object.metadata.labels) ? object.metadata.labels : {}"
+  validations:
+    - expression: variables.tokenNode != '' && variables.tokenNode == object.metadata.name
+      message: vesta may only label the node its pod runs on
+    - expression: >-
+        variables.newLabels.all(k, k == variables.key ||
+          (k in variables.oldLabels && variables.oldLabels[k] == variables.newLabels[k])) &&
+        variables.oldLabels.all(k, k == variables.key || k in variables.newLabels)
+      message: vesta may only change the vesta.dev/guest-ready label
+    - expression: >-
+        (has(object.metadata.annotations) ? object.metadata.annotations : {}) ==
+        (has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}) &&
+        object.spec == oldObject.spec
+      message: vesta may not change node annotations or spec
+    - expression: >-
+        !(variables.key in variables.newLabels) ||
+        variables.newLabels[variables.key].matches('^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$')
+      message: vesta.dev/guest-ready must be a semver without build metadata
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}

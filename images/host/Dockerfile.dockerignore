@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Allow-list for images/host/Dockerfile (build context is the repo root).
+*
+!go.mod
+!go.sum
+!api/
+!host/
+!images/guest/out/dist/
+**/*_test.go
+**/testdata/
+**/README.md

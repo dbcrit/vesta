@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["vesta-guestd"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# prost 0.14 and toml 1.x need 1.85; the builder image uses 1.98.1.
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/dbcrit/vesta"
+
+[workspace.lints.rust]
+# "deny", not "forbid": the libbpf-cargo skeleton module needs a scoped allow (FFI).
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

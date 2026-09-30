@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+# golangci-lint v2 configuration (hack/go-lint.sh, CI).
+version: "2"
+run:
+  timeout: 5m
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - unconvert
+    - wrapcheck
+  settings:
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/dbcrit/vesta/*
+      # Defaults, plus passthroughs whose errors callers compare by identity
+      # (io.EOF, context.Canceled, flag.ErrHelp) and must stay unwrapped.
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - errors.Join(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+        - io.ReadFull(
+        - .Read(b []byte)
+        - .Write(p []byte)
+        - (context.Context).Err()
+        - (*flag.FlagSet).Parse(
+    gosec:
+      excludes:
+        - G104 # unchecked errors: covered by errcheck and its presets
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+  exclusions:
+    generated: strict
+    # std-error-handling: unchecked Close/Flush/os.Remove*/fmt.Fprint*.
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Tests create fixtures with ordinary permissions and ignore cleanup errors.
+      - path: _test\.go
+        linters: [errcheck, gosec, noctx, wrapcheck]
+    paths:
+      - api/gen
+      - images/guest/out
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/dbcrit/vesta
+  exclusions:
+    generated: strict
+    paths:
+      - api/gen
+      - images/guest/out

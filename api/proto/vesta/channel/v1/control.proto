@@ -1,0 +1,274 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// vesta host <-> guest channel, protocol version 1.0 (ARCHITECTURE §2.3).
+//
+// Transport: AF_VSOCK in the guest. vesta-guestd listens on CTRL port 22085
+// and EVT port 22086 (configurable, see docs/compat/kata-4.2.md §3). The host
+// always initiates connections, one CTRL and one EVT connection per sandbox.
+// Hybrid vsock (CLH/Dragonball/Firecracker): the host writes
+// "CONNECT <port>\n" on the sandbox UDS and expects a line starting "OK ".
+//
+// Framing (both connections, both directions): each frame is a 4-byte
+// unsigned big-endian length N followed by N bytes of one protobuf message.
+// 1 <= N <= 1048576 (1 MiB). A receiver closes the connection on a length
+// outside that range, on a message that fails to decode, or on a message
+// type not valid for that connection and direction. It never allocates more
+// than N bytes for a frame, and it reads a frame within a deadline.
+//
+// Frame types:
+//   CTRL host -> guest: ControlRequest
+//   CTRL guest -> host: ControlResponse
+//   EVT  both ways:     EventStreamMessage (see events.proto for which
+//                       variants each side may send)
+//
+// Versioning: proto_major/proto_minor. This file defines 1.0. A receiver
+// accepts any minor of its own major (unknown fields are ignored per
+// proto3); the host supports majors N and N-1. The first CTRL frame from the
+// host MUST be Hello, and the first EVT frame MUST be Subscribe. Anything
+// else before that gets Error{UNSUPPORTED_VERSION or MALFORMED} and a close.
+//
+// Size limits below are enforced by the receiver. Guest -> host limits also
+// protect the host from a compromised guest (ARCHITECTURE §1.4.3).
+syntax = "proto3";
+
+package vesta.channel.v1;
+
+option go_package = "github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1";
+
+// ---- Envelopes -------------------------------------------------------------
+
+message ControlRequest {
+  // Chosen by the host, non-zero, unique per connection. Echoed in the
+  // matching ControlResponse. Responses may arrive out of order (BindContainer
+  // is acked once the cgroup is bound).
+  uint64 request_id = 1;
+  oneof body {
+    Hello hello = 10;
+    ApplyPolicy apply_policy = 11;
+    BindContainer bind_container = 12;
+    Unbind unbind = 13;
+    SetMode set_mode = 14;
+    GetStatus get_status = 15;
+  }
+}
+
+message ControlResponse {
+  uint64 request_id = 1; // 0 only for an Error that is not tied to a request
+  oneof body {
+    HelloReply hello_reply = 10;
+    Ack ack = 11;
+    Status status = 12;
+    Error error = 13;
+  }
+}
+
+// ---- Handshake -----------------------------------------------------------
+
+message Hello {
+  uint32 proto_major = 1;   // 1
+  uint32 proto_minor = 2;   // 0
+  string agent_version = 3; // vesta-agent semver, max 64 bytes
+  string sandbox_id = 4;    // for guest-side logging only, max 128 bytes
+}
+
+// Guest-asserted. The host uses it for the eligibility pre-check (§2.2).
+message HelloReply {
+  uint32 proto_major = 1;
+  uint32 proto_minor = 2;
+  string guest_image_version = 3;   // semver, no build metadata (label-safe), max 63 bytes
+  string kernel_release = 4;        // uname -r, max 128 bytes
+  repeated string active_lsms = 5;  // /sys/kernel/security/lsm split on ',', max 32 x 32 bytes
+  bool cgroup_v2 = 6;               // unified hierarchy mounted at /sys/fs/cgroup
+  repeated string features = 7;     // see "Feature strings" below, max 64 x 64 bytes
+  string guestd_version = 8;        // max 64 bytes
+  uint32 abi_version = 9;           // VESTA_ABI_VERSION of the loaded BPF objects
+  repeated ProgStatus progs = 10;   // max 64
+  GlobalMode global_mode = 11;
+  uint64 applied_generation = 12;   // 0 = baseline only
+}
+
+// Feature strings (unknown ones are ignored by the host):
+//   "exec_audit"   P1 attached
+//   "exec_lsm"     P2 attached (audit or enforce)
+//   "net_egress4"  N1 connect4 attached
+//   "net_egress6"  N1 connect6 attached
+//   "bpf_lsm"      "bpf" is in active_lsms
+//   "enforce"      guestd will apply MODE_ENFORCE bundles
+
+// ---- Policy --------------------------------------------------------------
+
+enum Mode {
+  MODE_UNSPECIFIED = 0; // treated as MODE_AUDIT
+  MODE_AUDIT = 1;
+  MODE_ENFORCE = 2;
+}
+
+enum FailurePolicy {
+  FAILURE_POLICY_UNSPECIFIED = 0; // treated as FAILURE_POLICY_OPEN
+  FAILURE_POLICY_OPEN = 1;
+  FAILURE_POLICY_CLOSED = 2;
+}
+
+// Kill switch (VestaConfig.globalMode).
+enum GlobalMode {
+  GLOBAL_MODE_UNSPECIFIED = 0; // treated as GLOBAL_MODE_NORMAL
+  GLOBAL_MODE_NORMAL = 1;
+  GLOBAL_MODE_AUDIT_ONLY = 2;
+  GLOBAL_MODE_DETACHED = 3;
+}
+
+// Same numbering as vesta_abi.h enum vesta_verdict.
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0; // as a default: allow
+  VERDICT_ALLOW = 1;
+  VERDICT_DENY = 2;
+}
+
+// Same numbering as vesta_abi.h enum vesta_rootfs_type.
+enum RootfsType {
+  ROOTFS_TYPE_UNKNOWN = 0;
+  ROOTFS_TYPE_GUEST_OVERLAY = 1;
+  ROOTFS_TYPE_VIRTIO_FS = 2;
+  ROOTFS_TYPE_BLOCK = 3;
+}
+
+// Replaces the whole policy set atomically and idempotently. The guest acks
+// with Ack{generation} after all maps are written. A generation lower than
+// the applied one is rejected (INVALID_ARGUMENT); an equal one is a no-op ack.
+message ApplyPolicy {
+  uint64 generation = 1;              // > 0, strictly increasing per sandbox
+  repeated PolicyBundle bundles = 2;  // max 256
+}
+
+message PolicyBundle {
+  uint32 policy_id = 1;       // 1..1024, unique within ApplyPolicy
+  string name = 2;            // "<namespace>/<name>" for logs, max 253 bytes
+  Mode mode = 3;
+  FailurePolicy failure = 4;
+  ExecRules exec = 5;
+  NetRules net = 6;
+  reserved 7;                 // FileRules, Phase 4 (not part of protocol 1.0)
+  reserved "file";
+  uint32 schema_version = 8;  // 1
+}
+
+// Paths are resolved to (dev, ino) in the guest when the bundle is applied.
+// A path that does not exist is skipped and reported in Ack.warnings.
+message ExecRules {
+  Verdict default_verdict = 1;  // when no rule matches; UNSPECIFIED = allow
+  repeated ExecRule rules = 2;  // max 4096 per bundle
+}
+
+message ExecRule {
+  uint32 rule_id = 1;  // > 0, echoed in events
+  string path = 2;     // absolute, no "..", max 4096 bytes
+  Verdict verdict = 3; // ALLOW or DENY
+}
+
+enum Protocol {
+  PROTOCOL_ANY = 0;
+  PROTOCOL_TCP = 6;
+  PROTOCOL_UDP = 17;
+}
+
+message NetRules {
+  Verdict default_egress = 1;        // when no rule matches; UNSPECIFIED = allow
+  repeated NetRule egress = 2;       // max 1024 per bundle
+}
+
+message NetRule {
+  uint32 rule_id = 1;          // > 0
+  string cidr = 2;             // "10.0.0.0/8" or "2001:db8::/32"; host-canonicalized
+  repeated uint32 ports = 3;   // 1..65535, max 64; empty = any port
+  Protocol protocol = 4;
+  Verdict verdict = 5;         // ALLOW or DENY
+}
+
+// Sent at NRI CreateContainer. Acked (Ack, same request_id) once
+// cgroup_policy is written for the container's cgroup, or with ok=false on
+// timeout / resolution failure.
+message BindContainer {
+  string container_id = 1;  // CRI container id, [0-9a-f]{64} or [A-Za-z0-9_.-]{1,128}
+  string cgroup_path = 2;   // OCI linux.cgroupsPath verbatim, max 4096 bytes (see kata-4.2.md §4)
+  uint32 policy_id = 3;     // 0 = monitor only (no rules, audit)
+  RootfsType rootfs = 4;
+  uint64 generation = 5;    // ApplyPolicy generation the policy_id refers to
+}
+
+message Unbind {
+  string container_id = 1;
+}
+
+message SetMode {
+  GlobalMode mode = 1;
+}
+
+message GetStatus {}
+
+// ---- Responses -----------------------------------------------------------
+
+message Ack {
+  uint64 generation = 1;
+  bool ok = 2;
+  string error = 3;            // max 1024 bytes
+  bytes verifier_log = 4;      // max 65536 bytes, only on load failures
+  repeated string warnings = 5; // max 64 x 256 bytes (e.g. unresolved paths)
+}
+
+message Status {
+  repeated ProgStatus progs = 1;           // max 64
+  uint64 applied_generation = 2;
+  bytes policy_hash = 3;                   // SHA-256 of the canonical applied set, 32 bytes
+  repeated DropCount drops = 4;            // cumulative, max 16
+  GlobalMode global_mode = 5;
+  repeated BoundContainer containers = 6;  // max 1024
+}
+
+enum ProgState {
+  PROG_STATE_UNSPECIFIED = 0;
+  PROG_STATE_ATTACHED = 1;
+  PROG_STATE_DETACHED = 2;  // kill switch or not enabled
+  PROG_STATE_FAILED = 3;    // load/verify/attach failed; see error, verifier_log
+}
+
+message ProgStatus {
+  string id = 1;            // program table ID, e.g. "P1", "N1-connect4"; max 32 bytes
+  string attach = 2;        // SEC name, e.g. "tp/sched/sched_process_exec"; max 128 bytes
+  ProgState state = 3;
+  uint32 prog_id = 4;
+  bytes tag = 5;            // 8 bytes (BPF_TAG_SIZE)
+  uint32 link_id = 6;
+  string error = 7;         // max 1024 bytes
+  bytes verifier_log = 8;   // max 65536 bytes
+}
+
+// drop_counters summed over CPUs, per event type.
+message DropCount {
+  uint32 event_type = 1;    // vesta.event.v1.EventType value
+  uint64 count = 2;
+}
+
+message BoundContainer {
+  string container_id = 1;
+  uint64 cgroup_id = 2;
+  uint32 policy_id = 3;
+  uint64 generation = 4;
+  bool pending = 5;         // bind received, cgroup not seen yet
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNSUPPORTED_VERSION = 1;
+  ERROR_CODE_MALFORMED = 2;
+  ERROR_CODE_INVALID_ARGUMENT = 3;
+  ERROR_CODE_NOT_FOUND = 4;
+  ERROR_CODE_LIMIT_EXCEEDED = 5;
+  ERROR_CODE_NOT_READY = 6;
+  ERROR_CODE_UNIMPLEMENTED = 7;
+  ERROR_CODE_INTERNAL = 8;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;       // max 1024 bytes
+}

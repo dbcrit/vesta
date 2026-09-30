@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Image digests pinned inside shell scripts (hack/*.sh, images/guest/**) are
+# not visible to Dependabot; bump those by hand with the digest re-resolved.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /guest
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directories:
+      - /images/host
+      - /images/guest/rootfs
+      - /guest
+      - /hack
+    schedule:
+      interval: weekly

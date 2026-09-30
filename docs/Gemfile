@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Local preview of the documentation site with the same gem set GitHub Pages
+# uses:
+#   cd docs && bundle install && bundle exec jekyll serve
+source "https://rubygems.org"
+
+# github-pages pins Jekyll and bundles jekyll-remote-theme,
+# jekyll-relative-links and jekyll-seo-tag.
+gem "github-pages", group: :jekyll_plugins
+
+group :jekyll_plugins do
+  gem "jekyll-remote-theme"
+  gem "jekyll-relative-links"
+  gem "jekyll-seo-tag"
+end
+
+# Ruby 3 no longer ships webrick, which `jekyll serve` needs.
+gem "webrick"

@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: Apache-2.0
+# /etc/vesta/guestd.toml, baked into the read-only vesta guest image.
+# Every key is optional; the values below are the defaults unless noted.
+# Unknown keys are rejected. Check a file with: vesta-guestd --check-config --config <file>
+
+# Guest image version (semver, no build metadata). It is reported in
+# HelloReply and must match the vesta.dev/guest-ready node label value.
+# The default is 0.0.0; the image build sets the real version.
+guest_image_version = "0.1.0"
+
+# vsock ports (docs/compat/kata-4.2.md §3). They must match vesta-agent.
+ctrl_port = 22085
+evt_port = 22086
+# Only this peer CID is served. 2 is the host; in-guest (loopback) peers are refused.
+allowed_peer_cid = 2
+
+pin_root = "/sys/fs/bpf/vesta"
+cgroup_root = "/sys/fs/cgroup"
+# kata-agent bind-mounts each container rootfs at <base>/<container-id>/rootfs.
+container_rootfs_base = "/run/kata-containers"
+
+heartbeat_interval_ms = 5000
+# Power of two, at least the page size. Guest memory is charged for it.
+ringbuf_bytes = 4194304
+# Unacked events kept for replay. AUDITED/ALLOWED events are evicted before DENIED ones.
+replay_max_events = 16384
+replay_max_bytes = 8388608
+
+# How long a BindContainer waits for the container's cgroup to appear.
+bind_timeout_ms = 10000
+bind_poll_ms = 20
+frame_timeout_ms = 10000
+write_timeout_ms = 10000
+# How often bindings of deleted cgroups are collected.
+gc_interval_ms = 30000
+
+# Capture argv in exec events.
+capture_argv = true
+# Also emit exec events for cgroups with no binding (kata-agent, systemd, ...).
+audit_unbound_exec = false
+# Accept MODE_ENFORCE bundles. Enforcement also needs "bpf" in the active LSM list.
+allow_enforce = true
+# Cgroups (relative to cgroup_root) that a BindContainer may not cover, nor
+# any of their ancestors. Binding one would apply a container policy to that
+# service through the BPF ancestor lookup. guestd's own cgroup is always added.
+protected_cgroups = ["system.slice/kata-agent.service"]
+log_level = "info"
+
+# Mode and failure policy for a bound container whose policy generation has
+# not been applied yet (BindContainer that races ApplyPolicy).
+[baseline]
+mode = "audit"     # audit | enforce
+failure = "open"   # open | closed

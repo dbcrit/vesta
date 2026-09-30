@@ -1,0 +1,44 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- if .Values.rbac.create }}
+# Only vesta-install talks to the API server: it reads its node (containerd
+# version) and sets the vesta.dev/guest-ready label. vesta-agent gets no
+# token. RBAC cannot scope this to one node or one label; the
+# ValidatingAdmissionPolicy in node-label-policy.yaml does.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "vesta.fullname" . }}-installer
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+  {{- if .Values.uninstall.enabled }}
+  # `vesta-install uninstall` refuses while pods on its node use the vesta
+  # handler. RBAC cannot restrict the list to one node (the installer uses a
+  # spec.nodeName field selector), so these are granted only while
+  # uninstall.enabled is set.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["list"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "vesta.fullname" . }}-installer
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "vesta.fullname" . }}-installer
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "vesta.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

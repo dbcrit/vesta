@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// EVT stream (ARCHITECTURE §2.3.3). Framing and versioning: see control.proto.
+//
+// host -> guest: subscribe (first frame, exactly once), event_ack
+// guest -> host: event_batch, heartbeat, error
+// Any other variant from a side, or a second subscribe, closes the connection.
+//
+// Delivery: guestd assigns Event.seq (monotonic from 1 per guest boot) and
+// keeps a bounded replay buffer of unacked events. On (re)subscribe it
+// resends from max(from_seq, oldest buffered); a gap between from_seq and the
+// first resent seq means events were lost and is visible to the host.
+// Acks are cumulative. Backpressure: when the buffer is full guestd evicts
+// AUDITED/ALLOWED events before DENIED ones; heartbeats are never buffered
+// (the latest one is always sent). Every eviction is counted in channel_drops.
+syntax = "proto3";
+
+package vesta.channel.v1;
+
+import "vesta/channel/v1/control.proto";
+import "vesta/event/v1/event.proto";
+
+option go_package = "github.com/dbcrit/vesta/api/gen/go/vesta/channel/v1;channelv1";
+
+message EventStreamMessage {
+  oneof msg {
+    Subscribe subscribe = 1;
+    EventAck event_ack = 2;
+    EventBatch event_batch = 3;
+    Heartbeat heartbeat = 4;
+    Error error = 5;
+  }
+}
+
+message Subscribe {
+  uint32 proto_major = 1;
+  uint32 proto_minor = 2;
+  uint64 from_seq = 3;  // first seq wanted; 0 = oldest available
+}
+
+message EventAck {
+  uint64 acked_seq = 1; // all events with seq <= acked_seq are acknowledged
+}
+
+message EventBatch {
+  uint64 first_seq = 1;                     // == events[0].seq
+  repeated vesta.event.v1.Event events = 2; // 1..512, seq strictly increasing; a gap = evicted events
+}
+
+// Sent every heartbeat_interval (default 5 s) even with no events. The host
+// alerts when none arrives within 2x the interval (§1.4.2 item 6).
+message Heartbeat {
+  uint64 seq = 1;                      // heartbeat counter, +1 per heartbeat
+  uint64 last_event_seq = 2;           // highest Event.seq assigned so far
+  uint64 applied_generation = 3;
+  bytes policy_hash = 4;               // 32 bytes, as in Status
+  repeated ProgStatus progs = 5;       // max 64; error/verifier_log left empty
+  repeated DropCount ringbuf_drops = 6;// cumulative, max 16
+  uint64 channel_drops = 7;            // cumulative events dropped in guestd
+  uint64 guestd_rss_bytes = 8;
+  uint64 guestd_cpu_ns = 9;            // cumulative user+sys
+  GlobalMode global_mode = 10;
+  uint32 interval_ms = 11;
+}

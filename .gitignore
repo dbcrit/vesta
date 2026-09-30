@@ -30,3 +30,19 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Rust
+guest/target/
+
+# BPF build outputs (generated vmlinux.h is committed per arch under bpf/vmlinux/)
+bpf/.output/
+*.bpf.o
+*.skel.h
+
+# Guest image / kernel build outputs
+images/guest/out/
+
+# Local build outputs
+/bin/
+/dist/
+.DS_Store

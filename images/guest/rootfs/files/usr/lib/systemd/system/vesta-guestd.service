@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: Apache-2.0
+# vesta-guestd: loads and attaches vesta's BPF programs, then serves the host
+# over vsock (CTRL 22085, EVT 22086). Ordering: docs/compat/kata-4.2.md §4.
+[Unit]
+Description=vesta guest security daemon
+Documentation=https://github.com/dbcrit/vesta
+DefaultDependencies=no
+# systemd mounts bpffs at /sys/fs/bpf itself. guestd must not mount it: a
+# mount made inside this unit's private namespace would hide its pins.
+After=sys-fs-bpf.mount systemd-tmpfiles-setup.service
+Before=kata-agent.service
+# A crash loop must not stop restarts: pinned links keep enforcing, and the
+# host detects the missing heartbeat.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+# READY=1 comes after programs are attached, or after a load failure has been
+# recorded, so a broken guestd delays kata-agent by at most this long.
+TimeoutStartSec=10s
+ExecStart=/usr/bin/vesta-guestd --config /etc/vesta/guestd.toml
+Restart=always
+RestartSec=1s
+OOMScoreAdjust=-997
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/console
+
+# Capabilities (guestd runs as root with a bounded set):
+#   CAP_BPF             create maps, load programs (bpf(2)).
+#   CAP_PERFMON         load tracing/LSM programs and attach tracepoints; the
+#                       tracing helpers (bpf_probe_read_kernel, d_path) need it.
+#   CAP_NET_ADMIN       attach cgroup/connect4 and connect6 (cgroup BPF attach).
+#   CAP_DAC_READ_SEARCH resolve exec-rule paths (stat) in container rootfs trees
+#                       whose directories root does not own.
+# No CAP_SYS_ADMIN: program ids and tags come from the fds guestd holds
+# (BPF_OBJ_GET_INFO_BY_FD) and pins are reopened with BPF_OBJ_GET. The
+# smoke test runs load/attach/pin/restart with exactly this set
+# (VESTA_SMOKE_UNIT_CAPS=1, see guest/README.md).
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+NoNewPrivileges=yes
+
+# Filesystem: everything read-only except bpffs and the runtime dir. The "-"
+# lets the unit start without /sys/fs/bpf so guestd can report the problem
+# instead of failing namespace setup with no status reaching the host.
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ReadWritePaths=-/sys/fs/bpf
+RuntimeDirectory=vesta
+RuntimeDirectoryMode=0700
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+# cgroupfs is read (cgroup ids, cgroup.controllers) but never written.
+ProtectControlGroups=yes
+UMask=0077
+
+# Process and syscall surface.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+# AF_VSOCK serves the host, AF_UNIX carries sd_notify.
+RestrictAddressFamilies=AF_VSOCK AF_UNIX
+SystemCallArchitectures=native
+# Allow-list only: bpf(2) and perf_event_open(2) (tracepoint attach) are not
+# in @system-service. Mount syscalls are deliberately not allowed.
+SystemCallFilter=@system-service bpf perf_event_open
+SystemCallErrorNumber=EPERM
+
+# Resource bounds (budget: RSS < 20 MiB; see ARCHITECTURE §5).
+TasksMax=64
+LimitNOFILE=4096
+LimitCORE=0
+
+[Install]
+WantedBy=kata-containers.target

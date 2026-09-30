@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+failure-threshold: style
+ignored:
+  # Base images are pinned by digest; distro package versions (apt, apk) float
+  # with the pinned snapshot of the base image, as in Kata's own builder images.
+  - DL3008
+  - DL3018

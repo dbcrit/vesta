@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// Security events produced inside a Kata guest (ARCHITECTURE §2.7).
+//
+// Fields in Event 1-49 are guest-asserted: set by BPF programs or
+// vesta-guestd and untrusted once the guest is compromised. The host
+// validates them against the limits documented here and drops (and counts)
+// events that violate them. Host is set only by vesta-agent from CRI/NRI and
+// the API server; a guest-supplied Host is discarded.
+syntax = "proto3";
+
+package vesta.event.v1;
+
+option go_package = "github.com/dbcrit/vesta/api/gen/go/vesta/event/v1;eventv1";
+
+enum EventType {
+  EVENT_TYPE_UNSPECIFIED = 0;
+  EVENT_TYPE_EXEC = 1;
+  EVENT_TYPE_CONNECT = 2;
+  EVENT_TYPE_SENDMSG = 3;     // reserved for Phase 4
+  EVENT_TYPE_BIND = 4;        // reserved for Phase 4
+  EVENT_TYPE_DNS = 5;         // reserved for Phase 4
+  EVENT_TYPE_FILE_OPEN = 6;   // reserved for Phase 4
+  EVENT_TYPE_FILE_MODIFY = 7; // reserved for Phase 4
+  EVENT_TYPE_PTRACE = 8;      // reserved for Phase 3
+  EVENT_TYPE_USERNS = 9;      // reserved for Phase 3
+  EVENT_TYPE_MOUNT = 10;      // reserved for Phase 4
+  EVENT_TYPE_SETUID = 11;     // reserved for Phase 4
+  EVENT_TYPE_MEMFD = 12;      // reserved for Phase 4
+  EVENT_TYPE_UNSHARE = 13;    // reserved for Phase 4
+  EVENT_TYPE_DUP_SOCKET = 14; // reserved for Phase 4
+  EVENT_TYPE_TAMPER = 15;     // reserved for Phase 3
+}
+
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_AUDITED = 1;
+  ACTION_DENIED = 2;
+  ACTION_ALLOWED = 3;
+}
+
+// Program that produced the event (vesta_abi.h enum vesta_hook).
+enum Hook {
+  HOOK_UNSPECIFIED = 0;
+  HOOK_SCHED_PROCESS_EXEC = 1;
+  HOOK_BPRM_CHECK_SECURITY = 2;
+  HOOK_CGROUP_CONNECT4 = 3;
+  HOOK_CGROUP_CONNECT6 = 4;
+}
+
+// Value N corresponds to vesta_abi.h flag bit (1 << (N - 1)).
+enum EventFlag {
+  EVENT_FLAG_UNSPECIFIED = 0;
+  EVENT_FLAG_PATH_TRUNCATED = 1;
+  EVENT_FLAG_ARGV_TRUNCATED = 2;
+  EVENT_FLAG_CGROUP_UNBOUND = 3;
+  EVENT_FLAG_POLICY_PENDING = 4;
+  EVENT_FLAG_WOULD_DENY = 5;
+  EVENT_FLAG_GLOBAL_AUDIT_ONLY = 6;
+  EVENT_FLAG_EXE_UNLINKED = 7;     // exe has no link left (deleted, memfd, O_TMPFILE) or is a pseudo file
+  EVENT_FLAG_EXE_OUTSIDE_ROOT = 8; // exe not reachable from the process root; path is from the global root
+}
+
+message Event {
+  uint64 seq = 1;                // per-sandbox monotonic, assigned by guestd, starts at 1
+  uint64 ktime_boot_ns = 2;      // bpf_ktime_get_boot_ns()
+  int64 guest_wall_unix_ns = 3;  // converted by guestd; informational only
+  EventType type = 4;
+  Action action = 5;
+  PolicyRef policy = 6;
+  Process process = 7;
+  repeated Ancestor chain = 8;   // max 8, nearest parent first
+  uint64 cgroup_id = 9;
+  string container_id = 10;      // guestd mapping; empty if unbound; max 128 bytes
+  repeated EventFlag flags = 11; // max 16, no duplicates
+  Hook hook = 12;
+
+  oneof detail {
+    Exec exec = 20;
+    Net net = 21;
+  }
+  reserved 22, 23, 24;           // dns, file, sys (Phase 3/4)
+  reserved "dns", "file", "sys";
+
+  Host host = 50;                // host-set enrichment
+}
+
+// policy_id, generation, rule_id are guest-asserted; name, namespace and uid
+// are filled in by the host from its own policy_id mapping.
+message PolicyRef {
+  uint32 policy_id = 1;
+  uint64 generation = 2;
+  uint32 rule_id = 3;
+  string name = 4;
+  string namespace = 5;
+  string uid = 6;
+}
+
+message FileId {
+  uint64 dev = 1;  // kernel s_dev encoding: (major << 20) | minor
+  uint64 ino = 2;
+}
+
+message Process {
+  uint32 pid = 1;              // kernel tid
+  uint32 tgid = 2;
+  uint32 ppid = 3;
+  uint32 ns_pid = 4;           // tgid in the task's pid namespace
+  uint32 uid = 5;
+  uint32 gid = 6;
+  string comm = 7;             // max 16 bytes
+  string exe_path = 8;         // max 4096 bytes
+  FileId exe = 9;
+  repeated string argv = 10;   // max 256 entries, max 4096 bytes total
+  bool argv_truncated = 11;
+  uint64 start_ktime_ns = 12;  // 0 if unknown
+}
+
+message Ancestor {
+  uint32 pid = 1;
+  string comm = 2;      // max 16 bytes
+  string exe_path = 3;  // max 4096 bytes
+}
+
+message Exec {
+  uint32 argc = 1;          // original argc
+  bool path_truncated = 2;
+}
+
+enum AddressFamily {
+  ADDRESS_FAMILY_UNSPECIFIED = 0;
+  ADDRESS_FAMILY_INET = 1;
+  ADDRESS_FAMILY_INET6 = 2;
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_EGRESS = 1;
+  DIRECTION_INGRESS = 2; // reserved for Phase 4
+}
+
+// Same numbering as vesta.channel.v1.Verdict and vesta_abi.h enum vesta_verdict.
+enum RuleVerdict {
+  RULE_VERDICT_UNSPECIFIED = 0;
+  RULE_VERDICT_ALLOW = 1;
+  RULE_VERDICT_DENY = 2;
+}
+
+message Net {
+  Direction direction = 1;
+  AddressFamily family = 2;
+  uint32 protocol = 3;         // IANA protocol number (6 = TCP, 17 = UDP)
+  bytes remote_addr = 4;       // exactly 4 (INET) or 16 (INET6) bytes, network order
+  uint32 remote_port = 5;      // host order, <= 65535
+  uint64 socket_cookie = 6;
+  RuleVerdict matched_verdict = 7;  // verdict of the matching rule, or the policy default
+}
+
+// Trusted enrichment added by vesta-agent. Never accepted from the guest.
+message Host {
+  string node = 1;
+  string sandbox_id = 2;
+  string pod_name = 3;
+  string pod_namespace = 4;
+  string pod_uid = 5;
+  string container_name = 6;
+  string image = 7;
+  string image_digest = 8;
+  string runtime_class = 9;       // runtime handler reported by NRI
+  string guest_image_version = 10;
+  string kernel_release = 11;
+  int64 received_unix_ns = 12;
+}

@@ -1,0 +1,330 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- $guestVersion := include "vesta.guestVersion" . }}
+{{- $containerdDir := include "vesta.containerdConfigDir" . }}
+{{- $seccompDir := include "vesta.seccompDir" . }}
+{{- $kataPrefix := trimSuffix "/" .Values.kata.installPrefix }}
+{{- $installProfile := and .Values.agent.seccomp.installProfile (eq .Values.agent.seccomp.profile.type "Localhost") (not .Values.uninstall.enabled) }}
+{{- $metricsExposed := include "vesta.metricsExposed" . }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "vesta.fullname" . }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "vesta.selectorLabels" . | nindent 6 }}
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "vesta.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: agent
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "vesta.serviceAccountName" . }}
+      # Only the installer gets an API token (projected volume below).
+      automountServiceAccountToken: false
+      # Host AF_VSOCK is not confirmed to be network-namespace aware, so the
+      # agent dials guests from the host network namespace.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      enableServiceLinks: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      nodeSelector:
+        kubernetes.io/os: linux
+        {{- with .Values.kata.nodeSelector }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        # All containers run as uid 0 with every capability dropped. The node
+        # paths they use (NRI socket, shim sockets, /opt/vesta, containerd
+        # config, systemd private socket, kubelet seccomp dir) are root-owned
+        # and root-only; uid 0 owns them, so no CAP_DAC_OVERRIDE is needed.
+        runAsUser: 0
+        runAsGroup: 0
+        runAsNonRoot: false
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- if $installProfile }}
+        - name: seccomp-profile
+          image: {{ include "vesta.image" (list .Values.seccompInstaller.image .) }}
+          imagePullPolicy: {{ .Values.seccompInstaller.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -euc
+            - |
+              case "$(uname -m)" in
+                x86_64) arch=amd64 ;;
+                aarch64) arch=arm64 ;;
+                *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+              esac
+              cp "/profiles/vesta-agent-${arch}.json" /seccomp/.vesta-agent.json.tmp
+              mv -f /seccomp/.vesta-agent.json.tmp /seccomp/vesta-agent.json
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: seccomp-profiles
+              mountPath: /profiles
+              readOnly: true
+            - name: kubelet-seccomp
+              mountPath: /seccomp
+        {{- end }}
+        - name: vesta-install
+          image: {{ include "vesta.image" (list .Values.installer.image .) }}
+          imagePullPolicy: {{ .Values.installer.image.pullPolicy }}
+          args:
+            {{- if .Values.uninstall.enabled }}
+            - uninstall
+            {{- else }}
+            - install
+            - --guest-version={{ $guestVersion }}
+            - --nri-default-validator={{ .Values.nri.defaultValidator }}
+            {{- end }}
+            - --host-root=/host
+            - --handler={{ .Values.runtimeClass.handler }}
+            - --kata-prefix={{ $kataPrefix }}
+            - --restart={{ ternary "systemd" "none" .Values.installer.restartContainerd }}
+            {{- with .Values.installer.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            {{- toYaml .Values.installer.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # Only the host paths vesta-install reads or writes, under its
+            # --host-root.
+            - name: vesta-root
+              mountPath: /host/opt/vesta
+            - name: kata-root
+              mountPath: /host{{ $kataPrefix }}
+              readOnly: true
+            - name: containerd-config
+              mountPath: /host{{ $containerdDir }}
+            {{- if .Values.installer.restartContainerd }}
+            - name: systemd-private
+              mountPath: /host/run/systemd/private
+            {{- end }}
+            - name: installer-token
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        {{- if .Values.uninstall.enabled }}
+        # The node is cleaned up once the init container succeeded; this only
+        # keeps the pod Ready so rollout status shows the cleanup finished.
+        - name: uninstalled
+          image: {{ include "vesta.image" (list .Values.seccompInstaller.image .) }}
+          imagePullPolicy: {{ .Values.seccompInstaller.image.pullPolicy }}
+          command: ["/bin/sleep", "2147483647"]
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        {{- else }}
+        - name: vesta-agent
+          image: {{ include "vesta.image" (list .Values.agent.image .) }}
+          imagePullPolicy: {{ .Values.agent.image.pullPolicy }}
+          args:
+            - --config=/etc/vesta/agent.yaml
+            {{- if $metricsExposed }}
+            # hostNetwork: the node IP, not every interface.
+            - --metrics-addr=[$(HOST_IP)]:{{ .Values.metrics.port }}
+            {{- end }}
+            {{- with .Values.agent.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            {{- if $metricsExposed }}
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+          {{- if .Values.agent.probes.enabled }}
+          # The kubelet probes from the host network namespace, so loopback works.
+          livenessProbe:
+            httpGet:
+              {{- if not $metricsExposed }}
+              host: 127.0.0.1
+              {{- end }}
+              path: /healthz
+              port: metrics
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              {{- if not $metricsExposed }}
+              host: 127.0.0.1
+              {{- end }}
+              path: /readyz
+              port: metrics
+            periodSeconds: 10
+          {{- end }}
+          resources:
+            {{- toYaml .Values.agent.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              {{- toYaml .Values.agent.seccomp.profile | nindent 14 }}
+          volumeMounts:
+            # Unix sockets can be connected to through read-only mounts.
+            - name: nri
+              mountPath: /var/run/nri
+              readOnly: true
+            - name: kata-rs-sandboxes
+              mountPath: /run/kata
+              readOnly: true
+            - name: kata-go-sandboxes
+              mountPath: /run/vc/sbs
+              readOnly: true
+            - name: config
+              mountPath: /etc/vesta/agent.yaml
+              subPath: agent.yaml
+              readOnly: true
+            {{- if .Values.staticPolicies }}
+            - name: policies
+              mountPath: /etc/vesta/policies
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+        {{- end }}
+      volumes:
+        - name: vesta-root
+          hostPath:
+            path: /opt/vesta
+            type: DirectoryOrCreate
+        - name: kata-root
+          hostPath:
+            path: {{ $kataPrefix }}
+            type: Directory
+        - name: containerd-config
+          hostPath:
+            path: {{ $containerdDir }}
+            type: Directory
+        {{- if .Values.installer.restartContainerd }}
+        - name: systemd-private
+          hostPath:
+            path: /run/systemd/private
+            type: Socket
+        {{- end }}
+        - name: installer-token
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+        {{- if $installProfile }}
+        - name: seccomp-profiles
+          configMap:
+            name: {{ include "vesta.fullname" . }}-seccomp
+        - name: kubelet-seccomp
+          hostPath:
+            path: {{ $seccompDir }}
+            type: DirectoryOrCreate
+        {{- end }}
+        - name: nri
+          hostPath:
+            path: /var/run/nri
+            type: DirectoryOrCreate
+        - name: kata-rs-sandboxes
+          hostPath:
+            path: /run/kata
+            type: DirectoryOrCreate
+        - name: kata-go-sandboxes
+          hostPath:
+            path: /run/vc/sbs
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: {{ include "vesta.fullname" . }}-agent
+        {{- if .Values.staticPolicies }}
+        - name: policies
+          configMap:
+            name: {{ include "vesta.fullname" . }}-policies
+        {{- end }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

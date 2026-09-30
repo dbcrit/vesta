@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# vesta-agent needs hostNetwork and hostPath volumes, so the namespace must
+# allow the privileged Pod Security level.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vesta-system
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

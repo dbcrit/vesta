@@ -1,0 +1,49 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- if .Values.nri.requirePluginAnnotation }}
+{{- $name := printf "%s-nri-required-plugin" (include "vesta.fullname" .) }}
+{{- $plugin := default "vesta" .Values.agent.config.pluginName }}
+# Pods of the vesta RuntimeClass must name the vesta NRI plugin as required,
+# so containerd's NRI default validator refuses to create their containers
+# while the plugin is not registered (ARCHITECTURE §2.9). Without it, NRI
+# skips an unregistered plugin and failurePolicy: Closed is not enforced.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: vesta-runtime-class
+      expression: >-
+        has(object.spec.runtimeClassName) && object.spec.runtimeClassName == {{ .Values.runtimeClass.name | quote }}
+  variables:
+    - name: key
+      expression: "'required-plugins.noderesource.dev/pod'"
+    - name: annotations
+      expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+  validations:
+    - expression: >-
+        variables.key in variables.annotations &&
+        variables.annotations[variables.key].matches('(^|[\\[,\\s"\'])' + {{ $plugin | squote }} + '([\\],\\s"\']|$)')
+      message: >-
+        pods of RuntimeClass {{ .Values.runtimeClass.name }} must carry the annotation
+        required-plugins.noderesource.dev/pod: '["{{ $plugin }}"]'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}

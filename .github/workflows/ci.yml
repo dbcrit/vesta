@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: Apache-2.0
+# Every job calls the same make targets developers run locally; toolchains
+# come from digest-pinned containers, so the runner only needs Docker.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (fmt, vet, lint, test -race, govulncheck)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make go-lint
+      - run: make go-test
+      - run: make go-vulncheck
+      - run: make agent
+
+  rust:
+    name: rust (fmt, clippy, test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make rust-lint
+      - run: make rust-test
+      # Needs --privileged Docker; P2 checks are skipped where the runner
+      # kernel does not have the bpf LSM active.
+      - run: make bpf-smoke
+
+  bpf:
+    name: bpf (build, ABI check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make abi-check
+      - run: make bpf
+
+  generated:
+    name: generated code is current (proto, seccomp, manifests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make proto-check
+      - run: make seccomp-check
+      - name: regenerate and diff
+        run: |
+          make proto seccomp helm
+          git diff --exit-code
+
+  helm:
+    name: helm (lint, kubeconform)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make helm-check
+
+  scripts:
+    name: shellcheck, hadolint, actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make script-lint
+
+  guest-kernel-config:
+    name: guest kernel fragment applies (Kata build-kernel.sh setup)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: make guest-kernel-config
+
+  image-agent:
+    name: vesta-agent image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - run: make image-agent

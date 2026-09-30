@@ -1,0 +1,17 @@
+vesta {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+The vesta-agent DaemonSet runs on nodes labelled
+{{- range $k, $v := .Values.kata.nodeSelector }} {{ $k }}={{ $v }}{{ end }}.
+Its vesta-install init container installs guest runtime {{ include "vesta.guestVersion" . }}
+and labels each node vesta.dev/guest-ready={{ include "vesta.guestVersion" . }}.
+
+The namespace must allow the "privileged" Pod Security level (hostNetwork
+and hostPath volumes), e.g.:
+  kubectl label namespace {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+
+Check node readiness:
+  kubectl get nodes -L vesta.dev/guest-ready
+
+Opt a pod in with:
+  spec:
+    runtimeClassName: {{ .Values.runtimeClass.name }}

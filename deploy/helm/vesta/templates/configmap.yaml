@@ -1,0 +1,49 @@
+{{- /* SPDX-License-Identifier: Apache-2.0 */ -}}
+{{- $cfg := deepCopy .Values.agent.config }}
+{{- $_ := set $cfg "handlers" (list .Values.runtimeClass.handler) }}
+{{- /* Loopback unless exposed; an exposed agent gets --metrics-addr=<node IP> (daemonset.yaml). */}}
+{{- $_ := set $cfg "metricsAddr" (printf "127.0.0.1:%d" (int .Values.metrics.port)) }}
+{{- if .Values.staticPolicies }}
+{{- $_ := set $cfg "policyFile" "/etc/vesta/policies/policies.yaml" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vesta.fullname" . }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+data:
+  agent.yaml: |
+    {{- toYaml $cfg | nindent 4 }}
+{{- if .Values.staticPolicies }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vesta.fullname" . }}-policies
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+data:
+  policies.yaml: |
+    {{- range $i, $p := .Values.staticPolicies }}
+    {{- if or (ne $p.apiVersion "vesta.dev/v1alpha1") (ne $p.kind "VestaPolicy") }}
+    {{- fail (printf "staticPolicies[%d] must be apiVersion vesta.dev/v1alpha1, kind VestaPolicy" $i) }}
+    {{- end }}
+    ---
+    {{- toYaml $p | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- if .Values.agent.seccomp.installProfile }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vesta.fullname" . }}-seccomp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "vesta.labels" . | nindent 4 }}
+data:
+  {{- (.Files.Glob "files/seccomp/vesta-agent-*.json").AsConfig | nindent 2 }}
+{{- end }}
