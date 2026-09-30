@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Pinned protobuf toolchain for hack/gen-proto.sh.
-FROM golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
+FROM golang:1.27-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
