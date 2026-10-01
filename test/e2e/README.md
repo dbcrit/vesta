@@ -13,7 +13,7 @@ Use one of these instead:
 
 | Host | Notes |
 |---|---|
-| **GitHub Actions** | `.github/workflows/e2e.yml`, run from the Actions tab (`workflow_dispatch`) or nightly. Hosted `ubuntu-24.04` runners expose `/dev/kvm`. Takes about 1 to 2 hours, mostly the guest kernel build. |
+| **GitHub Actions** | `.github/workflows/e2e.yml` (see [below](#github-actions)). Hosted `ubuntu-24.04` runners expose `/dev/kvm`. |
 | **Cloud VM with nested virtualization** | GCP: `gcloud compute instances create vesta-e2e --machine-type=n2-standard-8 --enable-nested-virtualization --image-family=ubuntu-2404-lts-amd64 --image-project=ubuntu-os-cloud --boot-disk-size=100GB`. Azure: Dv5/Ev5 sizes support nested virtualization. AWS: use a `*.metal` instance. |
 | **Bare-metal Linux** | Any x86_64 machine with VT-x/AMD-V enabled in firmware. |
 
@@ -34,6 +34,18 @@ test/e2e/down.sh --all   # also uninstall k3s, Cilium, Kata
 `make e2e` runs the first three. Re-running `deploy-vesta.sh` after a code change rebuilds and upgrades vesta in place. `E2E_SKIP_BUILD=1` reuses images already built for `VESTA_VERSION`. `test/e2e/test.sh exec_enforce hot_reload` runs only the named tests (the test workloads are always recreated first).
 
 Versions are pinned in [env.sh](env.sh) (k3s, Cilium, Kata, test images) and can be overridden from the environment.
+
+## GitHub Actions
+
+The `e2e` workflow runs the same scripts on a hosted runner:
+
+- **Manually:** Actions tab, "e2e", "Run workflow", or `gh workflow run e2e.yml`. Inputs: `tests` (space-separated test names, default all), `runner` (runner label), `k3s_version` and `cilium_version` (overrides of [env.sh](env.sh)).
+- **Nightly** on the default branch.
+- **On a pull request** once it carries the `run-e2e` label, and on every later push to it.
+
+Steps: KVM check, disk cleanup, guest kernel from the Actions cache (keyed on `images/guest/versions.env` and `images/guest/kernel/`; rebuilt and saved on a miss), guest rootfs and images build, `up.sh`, `deploy-vesta.sh`, `test.sh`. The test results appear in the run's summary. On failure or cancellation, the logs from `collect-logs.sh` are uploaded as the `e2e-artifacts-<run>` artifact.
+
+Expect about 60 to 90 minutes with a cached kernel and 20 more without. In a **private repository** the standard runner has 2 vCPUs and 7 GB of RAM, which is tight for a kernel build plus k3s, Cilium and several Kata VMs. If your plan has larger runners, pass one as `runner` (for example `gh workflow run e2e.yml -f runner=ubuntu-24.04-8core`). Runner minutes count against the plan's quota.
 
 ## What `up.sh` sets up
 

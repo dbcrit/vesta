@@ -199,6 +199,14 @@ bpf-smoke: ## Load/attach/enforce smoke test on the Docker host kernel (privileg
 	VESTA_PRIVILEGED=1 $(IN_BUILDER) sh -euc 'cd guest && VESTA_SMOKE_UNIT_CAPS=1 \
 		cargo test --locked -- --ignored --test-threads=1 smoke'
 
+.PHONY: bpf-vm
+bpf-vm: ## BPF smoke test inside QEMU on the vesta guest kernel (needs make guest-kernel; KVM if available)
+	hack/vm-bpf-test.sh vesta
+
+.PHONY: bpf-vm-6.1
+bpf-vm-6.1: ## BPF smoke test inside QEMU on Debian's 6.1 LTS kernel (the minimum guest kernel)
+	hack/vm-bpf-test.sh debian-6.1
+
 .PHONY: abi-check
 abi-check: ## Compile-check bpf/include/vesta_abi.h
 	hack/check-abi.sh

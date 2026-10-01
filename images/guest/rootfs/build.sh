@@ -141,6 +141,17 @@ build_dir="${rootfs_out}/build"
 rm -rf "${build_dir}"
 mkdir -p "${build_dir}"
 
+# The rootfs is unpacked into build_dir through a bind mount. On a
+# case-insensitive filesystem (macOS APFS by default) packages that ship
+# names differing only in case break: libpam-runtime's PAM.7.gz -> pam.7.gz
+# symlink points to itself and dpkg fails deep inside mmdebstrap.
+touch "${build_dir}/.case-probe"
+if [[ -e "${build_dir}/.CASE-PROBE" ]]; then
+	rm -f "${build_dir}/.case-probe"
+	die "${build_dir} is on a case-insensitive filesystem; build the guest rootfs on Linux (CI, the e2e host) or from a case-sensitive volume"
+fi
+rm -f "${build_dir}/.case-probe"
+
 # osbuilder runs nested containers (rootfs builder, privileged image builder
 # for loop devices) through the Docker socket; paths must match on both sides.
 log "running osbuilder (${ROOTFS_DISTRO} ${ROOTFS_OS_VERSION}, AGENT_INIT=no); this builds kata-agent and takes a while"

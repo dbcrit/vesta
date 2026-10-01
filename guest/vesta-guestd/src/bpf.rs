@@ -862,7 +862,13 @@ mod smoke {
         }
     }
 
+    /// VESTA_SMOKE_STRICT=1 (the VM runs, where everything must be there)
+    /// turns every skip into a failure.
     fn skip(why: &str) {
+        assert!(
+            std::env::var_os("VESTA_SMOKE_STRICT").is_none(),
+            "vesta BPF smoke test cannot run (VESTA_SMOKE_STRICT): {why}"
+        );
         eprintln!("SKIP vesta BPF smoke test: {why}");
     }
 

@@ -61,17 +61,57 @@ jobs:
         include:
           - arch: x86_64
             runner: ubuntu-24.04
+          # Hosted arm64 runners exist only for public repositories; a private
+          # repository builds aarch64 under QEMU emulation on x86_64 (slower).
           - arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ${{ github.event.repository.private && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Native build on each runner arch; the binary must be static.
-      - run: make guestd
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        if: matrix.runner == 'ubuntu-24.04' && matrix.arch == 'aarch64'
+        with:
+          platforms: arm64
+      # The binary must be static (it runs in any guest rootfs).
+      - run: make guestd ARCH=${{ matrix.arch }}
       - run: file images/guest/out/guestd/${{ matrix.arch }}/vesta-guestd | tee /dev/stderr | grep -q 'static'
+
+  bpf-vm:
+    name: BPF on guest kernels (vesta 6.18, Debian 6.1)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Give the runner user access to KVM
+        run: |
+          if [[ -e /dev/kvm ]]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+      # Same cache as the e2e workflow.
+      - name: Restore guest kernel
+        id: kernel
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: images/guest/out/kernel/x86_64
+          key: guest-kernel-x86_64-${{ hashFiles('images/guest/versions.env', 'images/guest/kernel/**', 'images/guest/lib.sh') }}
+      - name: Build guest kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        run: make guest-kernel
+      - name: Save guest kernel
+        if: steps.kernel.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: images/guest/out/kernel/x86_64
+          key: ${{ steps.kernel.outputs.cache-primary-key }}
+      - run: make bpf-vm
+      - run: make bpf-vm-6.1
 
   generated:
     name: generated code is current (proto, seccomp, manifests)

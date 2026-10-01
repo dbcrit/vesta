@@ -2,6 +2,8 @@
 
 vesta runs privileged code on Kubernetes nodes and inside Kata guest VMs, so we treat security reports as a priority.
 
+The STRIDE threat model, with trust boundaries, known open risks and planned mitigations, is in [docs/threat-model.md](docs/threat-model.md). Issues listed there as open are known; reports that go beyond them are especially welcome.
+
 ## Reporting a vulnerability
 
 **Do not open a public issue for a security problem.**

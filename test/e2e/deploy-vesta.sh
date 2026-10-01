@@ -7,6 +7,9 @@
 #   test/e2e/deploy-vesta.sh            build everything, then install
 #   E2E_SKIP_BUILD=1 test/e2e/deploy-vesta.sh
 #                                       reuse images already built for VESTA_VERSION
+#   E2E_BUILD_ONLY=1 test/e2e/deploy-vesta.sh
+#                                       build, but do not touch the cluster
+#   E2E_REUSE_KERNEL=1                  keep an existing vmlinux-vesta (CI cache)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -15,9 +18,18 @@ agent_image="${VESTA_REGISTRY}/vesta-agent:${VESTA_VERSION}"
 install_image="${VESTA_REGISTRY}/vesta-install:${VESTA_VERSION}"
 
 if [[ "${E2E_SKIP_BUILD:-}" != 1 ]]; then
-	log "building vesta ${VESTA_VERSION}: guest kernel, guest rootfs, host images (the kernel takes a while)"
-	make -C "${REPO_ROOT}" VERSION="${VESTA_VERSION}" REGISTRY="${VESTA_REGISTRY}" \
-		guest-kernel guest-rootfs images
+	targets=(guest-kernel guest-rootfs images)
+	kernel="${REPO_ROOT}/images/guest/out/kernel/$(uname -m)/vmlinux-vesta"
+	if [[ "${E2E_REUSE_KERNEL:-}" == 1 && -s "${kernel}" && -s "${kernel}.sha256" ]]; then
+		log "reusing the cached guest kernel ${kernel}"
+		targets=(guest-rootfs images)
+	fi
+	log "building vesta ${VESTA_VERSION}: ${targets[*]} (a kernel build takes a while)"
+	make -C "${REPO_ROOT}" VERSION="${VESTA_VERSION}" REGISTRY="${VESTA_REGISTRY}" "${targets[@]}"
+fi
+if [[ "${E2E_BUILD_ONLY:-}" == 1 ]]; then
+	log "build done (E2E_BUILD_ONLY)"
+	exit 0
 fi
 
 for img in "${agent_image}" "${install_image}"; do

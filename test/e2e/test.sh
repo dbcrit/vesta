@@ -301,6 +301,18 @@ done
 
 echo
 log "${#passed[@]} passed, ${#failed[@]} failed"
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+	{
+		echo "### vesta e2e: ${#passed[@]} passed, ${#failed[@]} failed"
+		echo
+		echo "| Test | Result |"
+		echo "|---|---|"
+		for t in "${passed[@]}"; do echo "| \`${t}\` | :white_check_mark: pass |"; done
+		for t in "${failed[@]}"; do echo "| \`${t}\` | :x: fail |"; done
+		echo
+		echo "k3s ${K3S_VERSION}, Cilium ${CILIUM_VERSION}, Kata ${KATA_VERSION}, vesta ${VESTA_VERSION}"
+	} >>"${GITHUB_STEP_SUMMARY}"
+fi
 if ((${#failed[@]} > 0)); then
 	printf '  failed: %s\n' "${failed[@]}"
 	"${E2E_DIR}/collect-logs.sh" || true
