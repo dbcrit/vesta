@@ -29,8 +29,8 @@ on:
         description: "Override CILIUM_VERSION (empty: test/e2e/env.sh)"
         required: false
         default: ""
-  schedule:
-    - cron: "17 3 * * *"
+ # schedule:
+ #   - cron: "17 3 * * *"
   pull_request:
     types: [labeled, synchronize]
 
