@@ -6,6 +6,8 @@ vesta runs BPF LSM, cgroup and tracepoint programs inside each Kata pod's guest 
 
 The design follows Ant Group's AntCWPP whitepaper, with vesta's own choices for transport, program lifecycle and threat model.
 
+The name: vesta is short for **V**irtual-machine **e**BPF **S**ecurity and **T**elemetry **A**gent. It is also a nod to Vesta, the Roman goddess of the hearth and home, who guarded what happens inside the house. vesta guards what happens inside each pod's VM.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture, threat model, roadmap and open questions.
 
 ## Status

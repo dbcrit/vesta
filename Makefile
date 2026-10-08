@@ -77,7 +77,7 @@ guestd: ## Build vesta-guestd (static musl, release) into images/guest/out/guest
 .PHONY: agent
 agent: ## Build vesta-agent and vesta-install into bin/linux_<arch>/
 	$(GO_DOCKER) env GOOS=linux GOARCH=$(OCI_ARCH) CGO_ENABLED=0 \
-		go build -trimpath -ldflags '$(GO_LDFLAGS)' -o $(BIN_DIR)/ ./host/cmd/vesta-agent ./host/cmd/vesta-install
+		go build -trimpath -buildvcs=false -ldflags '$(GO_LDFLAGS)' -o $(BIN_DIR)/ ./host/cmd/vesta-agent ./host/cmd/vesta-install
 
 ##@ Guest runtime (kernel + rootfs image)
 

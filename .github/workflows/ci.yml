@@ -121,6 +121,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The seccomp generator runs its arm64 build under emulation.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
       - run: make proto-check
       - run: make seccomp-check
       - name: regenerate and diff

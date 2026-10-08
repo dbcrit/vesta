@@ -10,6 +10,8 @@ permalink: /
 vesta runs eBPF programs inside the guest kernel of each Kata Containers pod. It audits process execution and outbound connections there and can block them. A node agent on the host (`vesta-agent`) talks to a daemon in each guest (`vesta-guestd`) over vsock. It gates container start on the guest confirming that a container's policy is in place, and it writes the guest's events as JSON lines. This site describes the code as it is today, a pre-release (`0.1.0-dev`), and not the full design.
 {: .fs-5 .fw-300 }
 
+The name: vesta is short for **V**irtual-machine **e**BPF **S**ecurity and **T**elemetry **A**gent. It is also a nod to Vesta, the Roman goddess of the hearth and home, who guarded what happens inside the house. vesta guards what happens inside each pod's VM.
+
 {: .warning }
 > vesta is a draft MVP (roadmap Phase 0/1, audit first, QEMU only). The components build and pass their unit tests, and the BPF programs pass a privileged smoke test on a Docker host kernel. **Nothing has run end to end inside a Kata VM yet.** See [Implementation status](IMPLEMENTATION_STATUS.md) before you deploy it anywhere.
 
