@@ -20,7 +20,6 @@ containerd_version="v2.4.1"
 # containerd v2.4.1 requires go >= 1.26.6; this throwaway module is separate
 # from the repo module (go 1.25).
 go_image="golang:1.26-trixie@sha256:bdca99a00bc16590cb1a0bb4e698f5fc5d6a64e4d5eef13d9f18a0ee08e5fa65"
-run_image="debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a"
 check=0
 [[ "${1:-}" == "--check" ]] && check=1
 
@@ -67,16 +66,19 @@ go 1.25.0
 require github.com/containerd/containerd/v2 ${containerd_version}
 EOF
 
-# Build natively for each arch (the profile depends on runtime.GOARCH), then
-# run the arm64 binary under emulation.
+# Build a static binary per arch (the profile depends on runtime.GOARCH) and
+# run both in the same container: the foreign one runs under the host's
+# binfmt_misc QEMU handler (docker/setup-qemu-action in CI, built into Docker
+# Desktop). A second image run with --platform would not work on Docker's
+# classic image store, which keeps one platform per digest.
 docker run --rm -v "${work}:/work" -w /work/gen -e CGO_ENABLED=0 -e GOFLAGS=-mod=mod \
 	-v vesta-gomod:/go/pkg/mod "${go_image}" bash -euo pipefail -c '
 		go mod tidy 2>&1 | grep -v "^go: downloading" >&2 || true
 		test -f go.sum
-		for a in amd64 arm64; do GOARCH=$a go build -trimpath -o /work/gen-$a .; done'
-for a in amd64 arm64; do
-	docker run --rm --platform "linux/${a}" -v "${work}:/work" "${run_image}" "/work/gen-${a}" >"${work}/out/vesta-agent-${a}.json"
-done
+		for a in amd64 arm64; do
+			GOARCH=$a go build -trimpath -o /work/gen-$a .
+			/work/gen-$a >/work/out/vesta-agent-$a.json
+		done'
 
 if ((check)); then
 	if ! diff -ru "${work}/out" "${out_dir}"; then
