@@ -592,6 +592,24 @@ func TestInstallFailuresRemoveLabel(t *testing.T) {
 	}
 }
 
+// kata-deploy 4.2 installs no /opt/kata/VERSION.
+func TestInstallWithoutKataVersionFile(t *testing.T) {
+	dir := nodeFixture(t, "version = 3\nimports = [\"/etc/containerd/conf.d/*.toml\"]\n")
+	if err := os.Remove(filepath.Join(dir, "opt/kata/VERSION")); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := hostfs.New(dir)
+	kube := &fakeKube{crv: "containerd://2.4.1", labels: map[string]string{}}
+	res, err := Install(context.Background(), Options{Root: root, Assets: assetsFixture(t, "0.1.0"), NodeName: "n",
+		Restarter: &fakeRestarter{}, Kube: kube, Log: testLog()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.KataVersion != "" || kube.labels[GuestReadyLabel] != "0.1.0" {
+		t.Fatalf("kata version %q, label %q", res.KataVersion, kube.labels[GuestReadyLabel])
+	}
+}
+
 func TestInstallRefusesChangedAssetsForSameVersion(t *testing.T) {
 	dir := nodeFixture(t, "version = 3\nimports = [\"/etc/containerd/conf.d/*.toml\"]\n")
 	root, _ := hostfs.New(dir)

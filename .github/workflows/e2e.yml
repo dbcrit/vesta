@@ -93,10 +93,24 @@ jobs:
           path: images/guest/out/kernel/x86_64
           key: guest-kernel-x86_64-${{ hashFiles('images/guest/versions.env', 'images/guest/kernel/**', 'images/guest/lib.sh') }}
 
+      # The guest image (Ubuntu rootfs, kata-agent built from source, vesta
+      # overlay) only changes with the Kata pin, the image recipe, guestd, the
+      # BPF programs or the guest version baked into it; a cache hit saves
+      # about 8 minutes.
+      - name: Restore guest image
+        id: rootfs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            images/guest/out/rootfs/x86_64/vesta-guest.img
+            images/guest/out/rootfs/x86_64/vesta-guest.img.sha256
+          key: guest-rootfs-x86_64-${{ env.VESTA_VERSION }}-${{ hashFiles('images/guest/versions.env', 'images/guest/lib.sh', 'images/guest/rootfs/**', 'guest/**', 'bpf/**') }}
+
       - name: Build vesta (guest kernel, guest rootfs, images)
         env:
           E2E_BUILD_ONLY: "1"
           E2E_REUSE_KERNEL: ${{ steps.kernel.outputs.cache-hit == 'true' && '1' || '' }}
+          E2E_REUSE_ROOTFS: ${{ steps.rootfs.outputs.cache-hit == 'true' && '1' || '' }}
         run: test/e2e/deploy-vesta.sh
 
       # Saved right after the build, so a later test failure still caches it.
@@ -106,6 +120,15 @@ jobs:
         with:
           path: images/guest/out/kernel/x86_64
           key: ${{ steps.kernel.outputs.cache-primary-key }}
+
+      - name: Save guest image
+        if: steps.rootfs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            images/guest/out/rootfs/x86_64/vesta-guest.img
+            images/guest/out/rootfs/x86_64/vesta-guest.img.sha256
+          key: ${{ steps.rootfs.outputs.cache-primary-key }}
 
       - name: Bring up k3s, Cilium and Kata
         run: test/e2e/up.sh

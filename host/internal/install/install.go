@@ -129,7 +129,9 @@ func install(ctx context.Context, o *Options) (*Result, error) {
 		return res, fmt.Errorf("kata: %w", err)
 	}
 	res.KataVersion = kata.Version
-	if kata.Version != TestedKataVersion {
+	if kata.Version == "" {
+		log.Warn("kata version unknown (no VERSION file); assuming the runtime-rs 4.x layout", "tested", TestedKataVersion)
+	} else if kata.Version != TestedKataVersion {
 		log.Warn("kata version differs from the tested release", "kata", kata.Version, "tested", TestedKataVersion)
 	}
 	log.Info("found kata", "version", kata.Version, "config", kata.ConfigPath, "drop_ins", len(kata.DropIns), "containerd", crv, "flavor", plan.Flavor)

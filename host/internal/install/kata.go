@@ -83,17 +83,23 @@ func DetectKata(root *hostfs.Root, prefix string) (*KataInstall, error) {
 	if !info.IsRegular() || info.Mode.Perm()&0o111 == 0 {
 		return nil, fmt.Errorf("kata shim %s is not an executable regular file", k.ShimPath)
 	}
+	// kata-deploy 4.2 installs per-component tarballs and no longer writes
+	// VERSION; the runtime-rs layout checked below then stands in for the
+	// major version check, and Version stays empty.
 	vb, err := root.ReadFile(path.Join(prefix, versionRel), 256)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
 		return nil, fmt.Errorf("cannot determine the Kata version: %w", err)
-	}
-	k.Version = strings.TrimSpace(string(vb))
-	major, err := majorOf(k.Version)
-	if err != nil {
-		return nil, fmt.Errorf("kata version: %w", err)
-	}
-	if major != SupportedKataMajor {
-		return nil, fmt.Errorf("kata %s is not supported (need %d.x, tested with %s)", k.Version, SupportedKataMajor, TestedKataVersion)
+	default:
+		k.Version = strings.TrimSpace(string(vb))
+		major, err := majorOf(k.Version)
+		if err != nil {
+			return nil, fmt.Errorf("kata version: %w", err)
+		}
+		if major != SupportedKataMajor {
+			return nil, fmt.Errorf("kata %s is not supported (need %d.x, tested with %s)", k.Version, SupportedKataMajor, TestedKataVersion)
+		}
 	}
 	for _, rel := range []string{runtimeConfigRel, pristineConfigRel} {
 		p := path.Join(prefix, rel)
