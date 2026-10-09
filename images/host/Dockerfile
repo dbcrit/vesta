@@ -6,7 +6,7 @@
 # vesta-install also needs the staged guest artifacts in
 # images/guest/out/dist/<TARGETARCH>/ (make guest-stage).
 
-ARG GO_IMAGE=golang:1.25-trixie@sha256:2c4c60ef415fbfa5e90300722293bef36c5e63fae17570ce18f580af933dbd73
+ARG GO_IMAGE=golang:1.26-trixie@sha256:74b756a8621f299bc587991ac19d1f26aa415006eb23c50132c467c29f8f5a25
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 
 FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build

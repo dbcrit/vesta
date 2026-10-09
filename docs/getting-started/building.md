@@ -77,7 +77,7 @@ The kernel source tree lives in the Docker volume `vesta-kernel-build-<arch>`, n
 | `image-agent` | `docker buildx build --target vesta-agent -t $(REGISTRY)/vesta-agent:$(VERSION) --load .` |
 | `image-install` | Depends on `guest-stage`. `docker buildx build --target vesta-install -t $(REGISTRY)/vesta-install:$(VERSION) --load .` The image carries the staged guest artifacts in `/usr/share/vesta/guest/` |
 
-Both images are built from [`images/host/Dockerfile`]({{ site.vesta_repo_url }}/blob/main/images/host/Dockerfile) for `linux/$(OCI_ARCH)`. The Go build stage uses `golang:1.25-trixie`, the runtime stage is `gcr.io/distroless/static-debian13:nonroot` (both pinned by digest), and the binaries run as `65532:65532` by default. The images are loaded into the local Docker daemon (`--load`). Pushing them to a registry is up to you.
+Both images are built from [`images/host/Dockerfile`]({{ site.vesta_repo_url }}/blob/main/images/host/Dockerfile) for `linux/$(OCI_ARCH)`. The Go build stage uses `golang:1.26-trixie`, the runtime stage is `gcr.io/distroless/static-debian13:nonroot` (both pinned by digest), and the binaries run as `65532:65532` by default. The images are loaded into the local Docker daemon (`--load`). Pushing them to a registry is up to you.
 
 ### Deploy
 
