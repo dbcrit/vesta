@@ -137,8 +137,20 @@ docker run --rm -v "${rootfs_out}:${rootfs_out}" -w "${stage}" -u "$(id -u):$(id
 require git
 fetch_kata
 
+# Kata 4.2.0 pins gperf (needed to build libseccomp for kata-agent) to
+# ftp.gnu.org.uk, which no longer answers, and its ORAS cache fallback needs
+# sudo inside the rootfs builder. GPERF_URL is not passed into that container,
+# so point versions.yaml at the main GNU mirror instead.
+gperf_url="${GPERF_URL:-https://ftp.gnu.org/gnu/gperf/}"
+versions_yaml="${kata_src}/versions.yaml"
+sed "s|url: \"https://ftp.gnu.org.uk/gnu/gperf/\"|url: \"${gperf_url}\"|" "${versions_yaml}" >"${versions_yaml}.tmp"
+mv "${versions_yaml}.tmp" "${versions_yaml}"
+grep -qF "url: \"${gperf_url}\"" "${versions_yaml}" || die "could not set the gperf url in ${versions_yaml}"
+
 build_dir="${rootfs_out}/build"
-rm -rf "${build_dir}"
+# A previous osbuilder run leaves a root-owned rootfs behind; remove it as root.
+rm -rf "${build_dir}" 2>/dev/null ||
+	docker run --rm -v "${rootfs_out}:${rootfs_out}" "${builder_image}" rm -rf "${build_dir}"
 mkdir -p "${build_dir}"
 
 # The rootfs is unpacked into build_dir through a bind mount. On a
