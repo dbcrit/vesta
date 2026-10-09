@@ -57,7 +57,8 @@ helm upgrade --install vesta "${REPO_ROOT}/deploy/helm/vesta" \
 	--set installer.image.tag="${VESTA_VERSION}" --set installer.image.pullPolicy=Never \
 	--set installer.containerdFlavor=k3s \
 	--set policies.source=kubernetes \
-	--set agent.config.logLevel=debug
+	--set agent.config.logLevel=debug \
+	--set 'installer.extraArgs={--guest-debug}'
 
 # Prints the agent pods' state and init container logs into the job log, so a
 # failed install can be diagnosed without the uploaded artifacts.

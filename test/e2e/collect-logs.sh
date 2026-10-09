@@ -27,6 +27,8 @@ kc -n kube-system logs -l name=kata-deploy --tail=-1 >"${out}/kata-deploy.log" 2
 kc -n kube-system logs ds/cilium --tail=2000 >"${out}/cilium.log" 2>&1
 curl -sf http://127.0.0.1:9464/metrics >"${out}/vesta-metrics.txt" 2>&1
 as_root journalctl -u k3s --no-pager --since "-2h" >"${out}/k3s.journal" 2>&1
+# k3s' containerd (and the Kata shims' "vm console" lines) log to a file.
+as_root cat /var/lib/rancher/k3s/agent/containerd/containerd.log >"${out}/containerd.log" 2>&1
 # Kata shim and hypervisor messages go to the journal via containerd.
 as_root journalctl --no-pager --since "-2h" -t kata -t containerd-shim-kata-v2 >"${out}/kata.journal" 2>&1
 as_root find /opt/vesta/kata -maxdepth 3 -ls >"${out}/opt-vesta.txt" 2>&1

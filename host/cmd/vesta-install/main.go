@@ -67,6 +67,7 @@ func run(args []string, log *slog.Logger) error {
 	sdSocket := fs.String("systemd-socket", "", "systemd private socket (default <host-root>/run/systemd/private)")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig for out-of-cluster use (default: in-cluster config)")
 	nriValidator := fs.Bool("nri-default-validator", true, "enable containerd's NRI default validator in the drop-in, so the required-plugins pod annotation can make vesta mandatory")
+	guestDebug := fs.Bool("guest-debug", false, "log the vesta guests' console in the host runtime log (debugging only)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -104,6 +105,7 @@ func run(args []string, log *slog.Logger) error {
 		Restarter: restarter, Kube: install.KubeAPI{Client: kube},
 		Log:          log.With("node", *nodeName, "installer", version),
 		NRIValidator: *nriValidator,
+		GuestDebug:   *guestDebug,
 	}
 	if cmd == "uninstall" {
 		return install.Uninstall(ctx, opts)

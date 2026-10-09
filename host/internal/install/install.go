@@ -43,6 +43,10 @@ type Options struct {
 	// NRIValidator enables containerd's NRI default validator in the drop-in
 	// (see RenderContainerdDropIn).
 	NRIValidator bool
+	// GuestDebug makes the vesta runtime log the guest console (see
+	// KataConfigInput.GuestDebug). For debugging only: every line the guest
+	// writes to its console ends up in the host's runtime log.
+	GuestDebug bool
 }
 
 func (o *Options) defaults() error {
@@ -147,7 +151,7 @@ func install(ctx context.Context, o *Options) (*Result, error) {
 	gen, err := GenerateKataConfig(KataConfigInput{
 		Base: kata.Config, DropIns: kata.DropIns,
 		KernelPath: vdir + "/" + KernelName, ImagePath: vdir + "/" + ImageName,
-		Version: o.Assets.Version,
+		Version: o.Assets.Version, GuestDebug: o.GuestDebug,
 	})
 	if err != nil {
 		return res, fmt.Errorf("generate kata config: %w", err)

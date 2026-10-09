@@ -53,6 +53,16 @@ func (s *sink) snapshot() (*policy.Set, int) {
 	return s.set, s.sets
 }
 
+// writeAtomic replaces path through a rename, as a ConfigMap update does, so
+// the polling reloader never reads a half-written file.
+func writeAtomic(path, content string) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -92,7 +102,7 @@ func TestFileReload(t *testing.T) {
 	}
 
 	// "a" sorts first but b keeps its id.
-	if err := os.WriteFile(path, []byte(polA+polB), 0o600); err != nil {
+	if err := writeAtomic(path, polA+polB); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "reload", func() bool { _, n := s.snapshot(); return n == 1 })
@@ -102,7 +112,7 @@ func TestFileReload(t *testing.T) {
 	}
 
 	// An invalid file keeps the current set and is not retried every tick.
-	if err := os.WriteFile(path, []byte(polA+"---\napiVersion: vesta.dev/v1alpha1\nkind: VestaPolicy\nmetadata: {name: c, namespace: ns}\nspec: {mode: Sometimes, selector: {}}\n"), 0o600); err != nil {
+	if err := writeAtomic(path, polA+"---\napiVersion: vesta.dev/v1alpha1\nkind: VestaPolicy\nmetadata: {name: c, namespace: ns}\nspec: {mode: Sometimes, selector: {}}\n"); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "rejection", func() bool {

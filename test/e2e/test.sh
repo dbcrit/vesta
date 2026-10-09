@@ -140,13 +140,18 @@ EOF
 # net_diag <client pod> <server>: shows which hop fails from a Kata client:
 # DNS, the Service ClusterIP, or the server pod IP.
 net_diag() {
-	local a
+	local kind a
 	echo "  dns $2: $(kx "$1" timeout 5 getent hosts "$2.${ns}.svc.cluster.local" 2>&1 | head -1)" >&2
-	for a in "$(kc -n "${ns}" get svc "$2" -o jsonpath='{.spec.clusterIP}')" "$(pod_ip "$2")"; do
-		if tcp_get "$1" "${a}" 8080 2>/dev/null | grep -q ok; then
-			echo "  ${a}:8080 ok" >&2
+	for kind in clusterIP podIP; do
+		if [[ "${kind}" == clusterIP ]]; then
+			a="$(kc -n "${ns}" get svc "$2" -o jsonpath='{.spec.clusterIP}' 2>&1 || true)"
 		else
-			echo "  ${a}:8080 failed" >&2
+			a="$(pod_ip "$2" 2>&1 || true)"
+		fi
+		if tcp_get "$1" "${a}" 8080 2>/dev/null | grep -q ok; then
+			echo "  ${kind} ${a}:8080 ok" >&2
+		else
+			echo "  ${kind} ${a}:8080 failed" >&2
 		fi
 	done
 }
@@ -155,6 +160,10 @@ test_cilium_kata_networking() {
 	tcp_get client "server-runc.${ns}.svc.cluster.local" 8080 | grep -q ok || {
 		echo "kata -> runc service failed" >&2
 		net_diag client server-runc
+		# Same checks from a stock Kata pod: tells a vesta guest problem from
+		# a Cilium + Kata one.
+		echo "  from plain-kata (stock Kata runtime):" >&2
+		net_diag plain-kata server-runc
 		return 1
 	}
 	tcp_get client "server-kata.${ns}.svc.cluster.local" 8080 | grep -q ok || {
@@ -345,6 +354,12 @@ if ((${#failed[@]} > 0)); then
 	# the job log without the uploaded artifacts.
 	log "vesta-agent log, last 80 non-event lines"
 	kc -n "${VESTA_NAMESPACE}" logs "$(agent_pod)" -c vesta-agent 2>&1 | grep -v '"attributes"' | tail -n 80 || true
+	# deploy-vesta.sh installs with --guest-debug, so runtime-rs logs each
+	# guest's console (guestd output, systemd unit failures). k3s writes its
+	# containerd log, which carries the shim's, to a file.
+	log "vesta guest console (guestd, failed units), last 60 lines"
+	as_root sh -c 'cat /var/lib/rancher/k3s/agent/containerd/containerd.log; journalctl --no-pager -t kata -t containerd-shim-kata-v2' 2>/dev/null |
+		grep 'vm console' | grep -i -E 'vesta|guestd|fail|error|denied' | tail -n 60 || true
 	"${E2E_DIR}/collect-logs.sh" || true
 	exit 1
 fi

@@ -32,6 +32,9 @@ type KataConfigInput struct {
 	KernelPath string
 	ImagePath  string
 	Version    string
+	// GuestDebug sets hypervisor.qemu.enable_debug, so runtime-rs logs the
+	// guest console ("vm console: ...", including vesta-guestd's output).
+	GuestDebug bool
 }
 
 // GeneratedKataConfig is the vesta runtime config: the node's base config
@@ -47,6 +50,7 @@ type qemuOverride struct {
 	Initrd            *string  `toml:"initrd,omitempty"`
 	KernelParams      string   `toml:"kernel_params"`
 	EnableAnnotations []string `toml:"enable_annotations"`
+	EnableDebug       *bool    `toml:"enable_debug,omitempty"`
 }
 
 type vestaDropIn struct {
@@ -192,6 +196,10 @@ func GenerateKataConfig(in KataConfigInput) (*GeneratedKataConfig, error) {
 	}
 	if o.Hypervisor.Qemu.EnableAnnotations == nil {
 		o.Hypervisor.Qemu.EnableAnnotations = []string{}
+	}
+	if in.GuestDebug {
+		debug := true
+		o.Hypervisor.Qemu.EnableDebug = &debug
 	}
 	if initrd != "" {
 		empty := ""

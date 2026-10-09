@@ -89,6 +89,18 @@ func TestGoldenKataConfig(t *testing.T) {
 	if q["kernel_params"] != "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 agent.https_proxy=http://proxy:3128 lockdown=integrity" {
 		t.Fatalf("kernel_params %q", q["kernel_params"])
 	}
+	if q["enable_debug"] == true {
+		t.Fatal("enable_debug set without GuestDebug")
+	}
+
+	in.GuestDebug = true
+	if g, err = GenerateKataConfig(in); err != nil {
+		t.Fatal(err)
+	}
+	eff, _ = effective(g.Config, g.DropIns)
+	if q, _ = qemuTable(eff); q["enable_debug"] != true {
+		t.Fatalf("GuestDebug: enable_debug = %v", q["enable_debug"])
+	}
 }
 
 func TestKataConfigEdgeCases(t *testing.T) {
