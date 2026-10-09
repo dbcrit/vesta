@@ -40,17 +40,22 @@ install_k3s() {
 }
 
 # CNI directories k3s' containerd uses; Cilium must install its plugin there.
+# k3s writes a cni section only when it has CNI dirs configured; with
+# --flannel-backend=none (k3s v1.37) it has none, and containerd uses its
+# defaults.
 k3s_cni_dirs() {
 	local cfg=/var/lib/rancher/k3s/agent/etc/containerd/config.toml bin conf
+	as_root test -f "${cfg}" || return 1
 	bin="$(as_root sed -nE 's/^[[:space:]]*bin_dirs?[[:space:]]*=[[:space:]]*\[?[[:space:]]*"([^"]+)".*/\1/p' "${cfg}" | head -1)"
 	conf="$(as_root sed -nE 's/^[[:space:]]*conf_dir[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "${cfg}" | head -1)"
-	[[ -n "${bin}" && -n "${conf}" ]] || die "could not read the CNI dirs from ${cfg}"
-	echo "${bin} ${conf}"
+	echo "${bin:-/opt/cni/bin} ${conf:-/etc/cni/net.d}"
 }
 
 install_cilium() {
-	local bin conf ip
-	read -r bin conf <<<"$(k3s_cni_dirs)"
+	local bin conf ip dirs
+	# A die inside $(...) would only end the subshell.
+	dirs="$(k3s_cni_dirs)" || die "k3s containerd config not found"
+	read -r bin conf <<<"${dirs}"
 	ip="$(node_ip)"
 	log "installing Cilium ${CILIUM_VERSION} (kube-proxy replacement, API ${ip}:6443, CNI ${bin} ${conf})"
 	# socketLB.hostNamespaceOnly: a Kata pod's sockets live in the guest
