@@ -50,8 +50,24 @@ helm upgrade --install vesta "${REPO_ROOT}/deploy/helm/vesta" \
 	--set policies.source=kubernetes \
 	--set agent.config.logLevel=debug
 
+# Prints the agent pods' state and init container logs into the job log, so a
+# failed install can be diagnosed without the uploaded artifacts.
+dump_install_state() {
+	kc -n "${VESTA_NAMESPACE}" get pods -o wide || true
+	kc -n "${VESTA_NAMESPACE}" describe pods | tail -n 60 || true
+	for c in seccomp-profile vesta-install; do
+		echo "--- ${c} log"
+		kc -n "${VESTA_NAMESPACE}" logs ds/vesta-agent -c "${c}" --tail=100 || true
+		kc -n "${VESTA_NAMESPACE}" logs ds/vesta-agent -c "${c}" --tail=100 --previous 2>/dev/null || true
+	done
+}
+
 # vesta-install restarts k3s (containerd) once to load its runtime handler.
-retry 900 "vesta-install to label the node" node_has_label "vesta.dev/guest-ready=${VESTA_VERSION}"
+retry 900 "vesta-install to label the node" node_has_label "vesta.dev/guest-ready=${VESTA_VERSION}" ||
+	{
+		dump_install_state
+		die "vesta-install did not label the node"
+	}
 retry 180 "the k3s API server" kc get --raw /readyz
 kc -n "${VESTA_NAMESPACE}" rollout status ds/vesta-agent --timeout=10m
 retry 60 "the kata-qemu-vesta RuntimeClass" kc get runtimeclass kata-qemu-vesta
