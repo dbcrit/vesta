@@ -63,7 +63,17 @@ run() {
 		return
 	fi
 	log "test: ${name}"
-	if ("test_${name}"); then
+	# Not `if (test)`: bash ignores set -e inside an if condition, so a
+	# failed step in the middle of a test would not fail it.
+	local rc
+	set +e
+	(
+		set -e
+		"test_${name}"
+	)
+	rc=$?
+	set -e
+	if ((rc == 0)); then
 		passed+=("${name}")
 		printf '  \033[1;32mPASS\033[0m %s\n' "${name}"
 	else
@@ -127,13 +137,29 @@ EOF
 
 # ---- tests ------------------------------------------------------------------
 
+# net_diag <client pod> <server>: shows which hop fails from a Kata client:
+# DNS, the Service ClusterIP, or the server pod IP.
+net_diag() {
+	local a
+	echo "  dns $2: $(kx "$1" timeout 5 getent hosts "$2.${ns}.svc.cluster.local" 2>&1 | head -1)" >&2
+	for a in "$(kc -n "${ns}" get svc "$2" -o jsonpath='{.spec.clusterIP}')" "$(pod_ip "$2")"; do
+		if tcp_get "$1" "${a}" 8080 2>/dev/null | grep -q ok; then
+			echo "  ${a}:8080 ok" >&2
+		else
+			echo "  ${a}:8080 failed" >&2
+		fi
+	done
+}
+
 test_cilium_kata_networking() {
 	tcp_get client "server-runc.${ns}.svc.cluster.local" 8080 | grep -q ok || {
 		echo "kata -> runc service failed" >&2
+		net_diag client server-runc
 		return 1
 	}
 	tcp_get client "server-kata.${ns}.svc.cluster.local" 8080 | grep -q ok || {
 		echo "kata -> kata service failed" >&2
+		net_diag client server-kata
 		return 1
 	}
 	kc -n "${ns}" exec server-runc -c app -- wget -qO- -T 10 "http://server-kata.${ns}.svc.cluster.local:8080" | grep -q ok || {
@@ -315,6 +341,10 @@ if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
 fi
 if ((${#failed[@]} > 0)); then
 	printf '  failed: %s\n' "${failed[@]}"
+	# The agent's own log lines (not exported events), so the cause shows in
+	# the job log without the uploaded artifacts.
+	log "vesta-agent log, last 80 non-event lines"
+	kc -n "${VESTA_NAMESPACE}" logs "$(agent_pod)" -c vesta-agent 2>&1 | grep -v '"attributes"' | tail -n 80 || true
 	"${E2E_DIR}/collect-logs.sh" || true
 	exit 1
 fi
