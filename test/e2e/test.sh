@@ -156,6 +156,16 @@ net_diag() {
 	done
 }
 
+# dns_diag: where name resolution breaks for Kata pods (UDP vs TCP to the DNS
+# Service, Kata only or cluster-wide).
+dns_diag() {
+	local name="server-runc.${ns}.svc.cluster.local"
+	echo "  kata resolv.conf: $(kx client cat /etc/resolv.conf 2>&1 | tr '\n' ' ')" >&2
+	echo "  kata dns over tcp: $(kx client env RES_OPTIONS=use-vc timeout 10 getent hosts "${name}" 2>&1 | head -1)" >&2
+	echo "  runc nslookup: $(kc -n "${ns}" exec server-runc -c app -- timeout 10 nslookup "${name}" 2>&1 | tail -n 3 | tr '\n' ' ')" >&2
+	echo "  coredns: $(kc -n kube-system get pods -l k8s-app=kube-dns -o wide --no-headers 2>&1 | tr '\n' ' ')" >&2
+}
+
 test_cilium_kata_networking() {
 	tcp_get client "server-runc.${ns}.svc.cluster.local" 8080 | grep -q ok || {
 		echo "kata -> runc service failed" >&2
@@ -164,6 +174,7 @@ test_cilium_kata_networking() {
 		# a Cilium + Kata one.
 		echo "  from plain-kata (stock Kata runtime):" >&2
 		net_diag plain-kata server-runc
+		dns_diag
 		return 1
 	}
 	tcp_get client "server-kata.${ns}.svc.cluster.local" 8080 | grep -q ok || {
