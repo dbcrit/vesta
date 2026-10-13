@@ -247,11 +247,11 @@ There is no `CAP_SYS_ADMIN`: program IDs and tags are read from the fds guestd h
 | Type, readiness | `Type=notify`, `NotifyAccess=main`, `TimeoutStartSec=10s` |
 | Ordering | `DefaultDependencies=no`, `After=sys-fs-bpf.mount systemd-tmpfiles-setup.service`, `Before=kata-agent.service`, `WantedBy=kata-containers.target` |
 | Restart | `Restart=always`, `RestartSec=1s`, `StartLimitIntervalSec=0`, `OOMScoreAdjust=-997` |
-| Filesystem | `ProtectSystem=strict`, `ReadWritePaths=-/sys/fs/bpf`, `RuntimeDirectory=vesta` (0700), `ProtectHome`, `PrivateTmp`, `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `ProtectHostname`, `ProtectControlGroups`, `UMask=0077` |
+| Filesystem | `ProtectSystem=strict`, `ReadWritePaths=-/sys/fs/bpf`, `RuntimeDirectory=vesta` (0700), `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel tunables read-only through `ReadOnlyPaths=` (`/proc/sys`, `/sys/kernel`, `/sys/devices` and similar; not `ProtectKernelTunables`, which would also make bpffs read-only), `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `ProtectHostname`, `ProtectControlGroups`, `UMask=0077` |
 | Process | `NoNewPrivileges`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces` |
 | Sockets and syscalls | `RestrictAddressFamilies=AF_VSOCK AF_UNIX`, `SystemCallArchitectures=native`, `SystemCallFilter=@system-service bpf perf_event_open`, `SystemCallErrorNumber=EPERM` (no mount syscalls) |
 | Resources | `TasksMax=64`, `LimitNOFILE=4096`, `LimitCORE=0` |
-| Output | `StandardOutput=tty`, `StandardError=tty`, `TTYPath=/dev/console` |
+| Output | `StandardOutput=journal+console`, `StandardError=journal+console` (`tty` on `/dev/console` fails with 209/STDOUT in the Kata guest) |
 
 guestd must not mount bpffs under this unit: a mount made in the unit's private mount namespace would hide its pins. It relies on systemd's `sys-fs-bpf.mount`. The kata-agent drop-in and boot ordering are on the [Guest image](guest-image.md#systemd-units-and-boot-ordering) page.
 

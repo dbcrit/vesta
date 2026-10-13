@@ -164,6 +164,8 @@ dns_diag() {
 	echo "  kata dns over tcp: $(kx client env RES_OPTIONS=use-vc timeout 10 getent hosts "${name}" 2>&1 | head -1)" >&2
 	echo "  runc nslookup: $(kc -n "${ns}" exec server-runc -c app -- timeout 10 nslookup "${name}" 2>&1 | tail -n 3 | tr '\n' ' ')" >&2
 	echo "  coredns: $(kc -n kube-system get pods -l k8s-app=kube-dns -o wide --no-headers 2>&1 | tr '\n' ' ')" >&2
+	echo "  coredns log:" >&2
+	kc -n kube-system logs -l k8s-app=kube-dns --tail=20 2>&1 | sed 's/^/    /' >&2 || true
 }
 
 test_cilium_kata_networking() {
