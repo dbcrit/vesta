@@ -81,7 +81,7 @@ Other hardening:
 - **Filesystem:** `ProtectSystem=strict`, kernel tunables read-only through `ReadOnlyPaths=` (not `ProtectKernelTunables`, under which bpffs stays read-only), `ProtectControlGroups` (read-only), `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`. `/sys/fs/bpf` is the only writable path.
 - **Syscalls and sockets:** `RestrictAddressFamilies=AF_VSOCK AF_UNIX`. `SystemCallFilter` is `@system-service` plus `bpf` and `perf_event_open`, so mount syscalls are not allowed.
 - **Why guestd must not mount bpffs:** systemd mounts bpffs at boot. A bpffs mounted inside the unit's private mount namespace would hide guestd's pins.
-- **Misc:** `NoNewPrivileges`, `MemoryDenyWriteExecute`, `LockPersonality`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `TasksMax=64`, `OOMScoreAdjust=-997` (same as kata-agent).
+- **Misc:** `NoNewPrivileges`, `MemoryDenyWriteExecute`, `LockPersonality`, `RestrictNamespaces`, `RestrictRealtime`, `TasksMax=64`, `OOMScoreAdjust=-997` (same as kata-agent). Not `RestrictSUIDSGID`: systemd then fails `openat2` with ENOSYS, which guestd needs for cgroup and exec-rule lookups.
 
 ### Kernel command line
 

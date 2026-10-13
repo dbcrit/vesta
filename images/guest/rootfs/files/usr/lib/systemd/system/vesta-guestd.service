@@ -73,7 +73,11 @@ UMask=0077
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
+# Not RestrictSUIDSGID=yes: systemd cannot filter openat2's flags, so it makes
+# openat2 fail with ENOSYS, and guestd needs it (cgroup lookup with
+# RESOLVE_BENEATH, exec rules with RESOLVE_IN_ROOT). NoNewPrivileges= keeps
+# set-id bits from granting privileges, and ProtectSystem=strict leaves almost
+# nothing writable.
 RestrictNamespaces=yes
 # AF_VSOCK serves the host, AF_UNIX carries sd_notify.
 RestrictAddressFamilies=AF_VSOCK AF_UNIX

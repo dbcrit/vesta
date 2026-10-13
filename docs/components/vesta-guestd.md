@@ -248,7 +248,7 @@ There is no `CAP_SYS_ADMIN`: program IDs and tags are read from the fds guestd h
 | Ordering | `DefaultDependencies=no`, `After=sys-fs-bpf.mount systemd-tmpfiles-setup.service`, `Before=kata-agent.service`, `WantedBy=kata-containers.target` |
 | Restart | `Restart=always`, `RestartSec=1s`, `StartLimitIntervalSec=0`, `OOMScoreAdjust=-997` |
 | Filesystem | `ProtectSystem=strict`, `ReadWritePaths=-/sys/fs/bpf`, `RuntimeDirectory=vesta` (0700), `ProtectHome`, `PrivateTmp`, `PrivateDevices`, kernel tunables read-only through `ReadOnlyPaths=` (`/proc/sys`, `/sys/kernel`, `/sys/devices` and similar; not `ProtectKernelTunables`, which would also make bpffs read-only), `ProtectKernelModules`, `ProtectKernelLogs`, `ProtectClock`, `ProtectHostname`, `ProtectControlGroups`, `UMask=0077` |
-| Process | `NoNewPrivileges`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictSUIDSGID`, `RestrictNamespaces` |
+| Process | `NoNewPrivileges`, `LockPersonality`, `MemoryDenyWriteExecute`, `RestrictRealtime`, `RestrictNamespaces` (not `RestrictSUIDSGID`, which makes `openat2` fail with ENOSYS) |
 | Sockets and syscalls | `RestrictAddressFamilies=AF_VSOCK AF_UNIX`, `SystemCallArchitectures=native`, `SystemCallFilter=@system-service bpf perf_event_open`, `SystemCallErrorNumber=EPERM` (no mount syscalls) |
 | Resources | `TasksMax=64`, `LimitNOFILE=4096`, `LimitCORE=0` |
 | Output | `StandardOutput=journal+console`, `StandardError=journal+console` (`tty` on `/dev/console` fails with 209/STDOUT in the Kata guest) |
