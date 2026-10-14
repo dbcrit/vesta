@@ -133,6 +133,15 @@ spec:
     - {name: app, image: "${E2E_IMAGE}", command: ["sleep", "infinity"]}
 EOF
 	kc -n "${ns}" wait --for=condition=Ready pod --all --timeout=10m >/dev/null
+	# CoreDNS can lag behind new Services: its API watch breaks while
+	# kata-deploy restarts k3s and backs off before relisting, answering
+	# NXDOMAIN meanwhile. Wait for it from a runc pod, so cilium_kata_networking
+	# tests Kata networking, not CoreDNS catching up.
+	local svc
+	for svc in server-runc server-kata; do
+		retry 180 "cluster DNS to resolve ${svc}" \
+			kc -n "${ns}" exec server-runc -c app -- nslookup "${svc}.${ns}.svc.cluster.local" || true
+	done
 }
 
 # ---- tests ------------------------------------------------------------------
